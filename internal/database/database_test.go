@@ -57,40 +57,6 @@ func TestClientCRUD(t *testing.T) {
 	if len(clients) != 1 {
 		t.Errorf("expected 1 client, got %d", len(clients))
 	}
-
-	// Delete
-	if err := db.DeleteClient("test-id"); err != nil {
-		t.Fatalf("DeleteClient: %v", err)
-	}
-	clients, _ = db.ListClients()
-	if len(clients) != 0 {
-		t.Errorf("expected 0 clients after delete, got %d", len(clients))
-	}
-}
-
-func TestUpsertClient(t *testing.T) {
-	db := testDB(t)
-
-	// Insert
-	if err := db.UpsertClient("test-id", "hash1", "https://a.com/cb", "first"); err != nil {
-		t.Fatal(err)
-	}
-	c, _ := db.GetClient("test-id")
-	if c.ClientSecretHash != "hash1" {
-		t.Errorf("expected hash1, got %s", c.ClientSecretHash)
-	}
-
-	// Update
-	if err := db.UpsertClient("test-id", "hash2", "https://b.com/cb", "second"); err != nil {
-		t.Fatal(err)
-	}
-	c, _ = db.GetClient("test-id")
-	if c.ClientSecretHash != "hash2" {
-		t.Errorf("expected hash2, got %s", c.ClientSecretHash)
-	}
-	if c.RedirectURI != "https://b.com/cb" {
-		t.Errorf("expected updated redirect_uri, got %s", c.RedirectURI)
-	}
 }
 
 func TestLockRedirectURI(t *testing.T) {
@@ -146,24 +112,15 @@ func TestAuthCodeFlow(t *testing.T) {
 	if ac.ClientID != "client1" {
 		t.Errorf("expected client_id=client1, got %s", ac.ClientID)
 	}
-	if ac.UsedAt != nil {
-		t.Error("expected unused code")
+	// Delete (single-use)
+	if err := db.DeleteAuthCode("code123"); err != nil {
+		t.Fatalf("DeleteAuthCode: %v", err)
 	}
 
-	// Mark used
-	if err := db.MarkCodeUsed("code123"); err != nil {
-		t.Fatalf("MarkCodeUsed: %v", err)
-	}
-
-	// Verify marked
+	// Second lookup should find nothing
 	ac, _ = db.GetAuthCode("code123")
-	if ac.UsedAt == nil {
-		t.Error("expected code to be marked used")
-	}
-
-	// Double use should fail
-	if err := db.MarkCodeUsed("code123"); err == nil {
-		t.Error("expected error on double use")
+	if ac != nil {
+		t.Error("expected auth code to be gone after delete")
 	}
 }
 
