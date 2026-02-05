@@ -70,11 +70,6 @@ func (d *DB) ListClients() ([]Client, error) {
 	return clients, rows.Err()
 }
 
-func (d *DB) DeleteClient(clientID string) error {
-	_, err := d.db.Exec("DELETE FROM clients WHERE client_id = ?", clientID)
-	return err
-}
-
 func (d *DB) RevokeClientTokens(clientID string) (int64, error) {
 	res, err := d.db.Exec("DELETE FROM refresh_tokens WHERE client_id = ?", clientID)
 	if err != nil {
@@ -98,15 +93,3 @@ func (d *DB) LockRedirectURI(clientID, redirectURI string) (bool, error) {
 	return n > 0, nil
 }
 
-func (d *DB) UpsertClient(clientID, secretHash, redirectURI, description string) error {
-	_, err := d.db.Exec(
-		`INSERT INTO clients (client_id, client_secret_hash, redirect_uri, created_at, description)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(client_id) DO UPDATE SET
-		   client_secret_hash = excluded.client_secret_hash,
-		   redirect_uri = excluded.redirect_uri,
-		   description = excluded.description`,
-		clientID, secretHash, redirectURI, time.Now().Unix(), description,
-	)
-	return err
-}

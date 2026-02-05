@@ -276,11 +276,6 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "Invalid authorization code")
 		return
 	}
-	if ac.UsedAt != nil {
-		h.Logger.Warn("token: auth code replay detected", "client_id", req.clientID)
-		tokenError(w, http.StatusBadRequest, "invalid_grant", "Authorization code already used")
-		return
-	}
 	if time.Now().After(ac.ExpiresAt) {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "Authorization code expired")
 		return
@@ -323,9 +318,9 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Mark code as used
-	if err := h.DB.MarkCodeUsed(req.code); err != nil {
-		h.Logger.Error("token: marking code used", "error", err)
+	// Delete code (single-use: a second attempt finds no row)
+	if err := h.DB.DeleteAuthCode(req.code); err != nil {
+		h.Logger.Error("token: deleting auth code", "error", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
 		return
 	}

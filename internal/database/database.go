@@ -71,7 +71,6 @@ func (d *DB) migrate() error {
 			scope TEXT,
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,
-			used_at INTEGER,
 			FOREIGN KEY (client_id) REFERENCES clients(client_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -122,21 +121,9 @@ func (d *DB) SigningKey() ([]byte, error) {
 
 func (d *DB) CleanupExpired() error {
 	now := time.Now().Unix()
-
-	tx, err := d.db.Begin()
-	if err != nil {
+	if _, err := d.db.Exec("DELETE FROM auth_codes WHERE expires_at < ?", now); err != nil {
 		return err
 	}
-	defer tx.Rollback()
-
-	// Delete expired auth codes
-	if _, err := tx.Exec("DELETE FROM auth_codes WHERE expires_at < ?", now); err != nil {
-		return err
-	}
-	// Delete expired refresh tokens
-	if _, err := tx.Exec("DELETE FROM refresh_tokens WHERE expires_at < ?", now); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	_, err := d.db.Exec("DELETE FROM refresh_tokens WHERE expires_at < ?", now)
+	return err
 }
