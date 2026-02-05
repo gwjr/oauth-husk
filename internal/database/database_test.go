@@ -187,14 +187,6 @@ func TestRefreshTokenCRUD(t *testing.T) {
 	if rt.ClientID != "client1" {
 		t.Errorf("expected client1, got %s", rt.ClientID)
 	}
-	// Verify it's stored as a hash, not the raw token
-	if rt.TokenHash == "raw-refresh-token" {
-		t.Error("expected token to be stored as hash, not raw value")
-	}
-	expectedHash := HashToken("raw-refresh-token")
-	if rt.TokenHash != expectedHash {
-		t.Errorf("expected hash %s, got %s", expectedHash, rt.TokenHash)
-	}
 
 	// Revoke (delete)
 	if err := db.RevokeRefreshToken("raw-refresh-token"); err != nil {

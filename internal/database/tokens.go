@@ -7,7 +7,6 @@ import (
 )
 
 type RefreshToken struct {
-	TokenHash string
 	ClientID  string
 	Scope     string
 	CreatedAt time.Time
@@ -26,14 +25,14 @@ func (d *DB) StoreRefreshToken(rawToken, clientID, scope string, expiresAt time.
 // GetRefreshToken looks up a refresh token by hashing the raw value.
 func (d *DB) GetRefreshToken(rawToken string) (*RefreshToken, error) {
 	row := d.db.QueryRow(
-		"SELECT token_hash, client_id, scope, created_at, expires_at FROM refresh_tokens WHERE token_hash = ?",
+		"SELECT client_id, scope, created_at, expires_at FROM refresh_tokens WHERE token_hash = ?",
 		HashToken(rawToken),
 	)
 
 	var t RefreshToken
 	var createdAt, expiresAt int64
 	var scope sql.NullString
-	if err := row.Scan(&t.TokenHash, &t.ClientID, &scope, &createdAt, &expiresAt); err != nil {
+	if err := row.Scan(&t.ClientID, &scope, &createdAt, &expiresAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
