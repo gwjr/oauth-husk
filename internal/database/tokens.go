@@ -15,11 +15,10 @@ type RefreshToken struct {
 }
 
 // StoreRefreshToken stores a refresh token by its SHA-256 hash.
-func (d *DB) StoreRefreshToken(rawToken, clientID, scope, authCode string, expiresAt time.Time) error {
-	codeHash := HashToken(authCode)
+func (d *DB) StoreRefreshToken(rawToken, clientID, scope string, expiresAt time.Time) error {
 	_, err := d.db.Exec(
-		"INSERT INTO refresh_tokens (token_hash, client_id, scope, auth_code, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-		HashToken(rawToken), clientID, scope, codeHash, time.Now().Unix(), expiresAt.Unix(),
+		"INSERT INTO refresh_tokens (token_hash, client_id, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+		HashToken(rawToken), clientID, scope, time.Now().Unix(), expiresAt.Unix(),
 	)
 	return err
 }
@@ -50,25 +49,4 @@ func (d *DB) GetRefreshToken(rawToken string) (*RefreshToken, error) {
 func (d *DB) RevokeRefreshToken(rawToken string) error {
 	_, err := d.db.Exec("DELETE FROM refresh_tokens WHERE token_hash = ?", HashToken(rawToken))
 	return err
-}
-
-// RevokeTokensByAuthCode deletes all access and refresh tokens issued from a given auth code.
-func (d *DB) RevokeTokensByAuthCode(authCode string) (int64, error) {
-	if authCode == "" {
-		return 0, nil
-	}
-	codeHash := HashToken(authCode)
-	tx, err := d.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-
-	res, err := tx.Exec("DELETE FROM refresh_tokens WHERE auth_code = ?", codeHash)
-	if err != nil {
-		return 0, err
-	}
-
-	n, _ := res.RowsAffected()
-	return n, tx.Commit()
 }

@@ -78,7 +78,6 @@ func (d *DB) migrate() error {
 			token_hash TEXT PRIMARY KEY,
 			client_id TEXT NOT NULL,
 			scope TEXT,
-			auth_code TEXT DEFAULT '',
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,
 			FOREIGN KEY (client_id) REFERENCES clients(client_id)
@@ -86,7 +85,6 @@ func (d *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_auth_codes_expires ON auth_codes(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires ON refresh_tokens(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON refresh_tokens(client_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_auth_code ON refresh_tokens(auth_code)`,
 	}
 
 	for _, m := range migrations {

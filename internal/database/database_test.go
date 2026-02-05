@@ -172,7 +172,7 @@ func TestRefreshTokenCRUD(t *testing.T) {
 	db.CreateClient("client1", "hash", "https://example.com/cb", "")
 
 	expires := time.Now().Add(30 * 24 * time.Hour)
-	if err := db.StoreRefreshToken("raw-refresh-token", "client1", "mcp:tools", "", expires); err != nil {
+	if err := db.StoreRefreshToken("raw-refresh-token", "client1", "mcp:tools", expires); err != nil {
 		t.Fatalf("StoreRefreshToken: %v", err)
 	}
 
@@ -211,8 +211,8 @@ func TestRevokeClientTokens(t *testing.T) {
 	db.CreateClient("client1", "hash", "https://example.com/cb", "")
 
 	expires := time.Now().Add(24 * time.Hour)
-	db.StoreRefreshToken("rt1", "client1", "", "", expires)
-	db.StoreRefreshToken("rt2", "client1", "", "", expires)
+	db.StoreRefreshToken("rt1", "client1", "", expires)
+	db.StoreRefreshToken("rt2", "client1", "", expires)
 
 	n, err := db.RevokeClientTokens("client1")
 	if err != nil {
@@ -231,7 +231,7 @@ func TestCleanupExpired(t *testing.T) {
 	db.StoreAuthCode("expired-code", "client1", "https://example.com/cb", "ch", "", -1*time.Second)
 
 	// Store expired refresh token
-	db.StoreRefreshToken("expired-rt", "client1", "", "", time.Now().Add(-1*time.Hour))
+	db.StoreRefreshToken("expired-rt", "client1", "", time.Now().Add(-1*time.Hour))
 
 	if err := db.CleanupExpired(); err != nil {
 		t.Fatal(err)

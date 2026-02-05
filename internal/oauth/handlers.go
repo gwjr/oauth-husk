@@ -277,13 +277,7 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if ac.UsedAt != nil {
-		// RFC 6749 §10.5: if a code is used more than once, revoke all tokens issued from it
-		h.Logger.Warn("token: auth code replay detected — revoking all tokens from this code", "client_id", req.clientID)
-		if n, err := h.DB.RevokeTokensByAuthCode(req.code); err != nil {
-			h.Logger.Error("token: failed to revoke tokens on code replay", "error", err)
-		} else if n > 0 {
-			h.Logger.Warn("token: revoked tokens due to code replay", "client_id", req.clientID, "count", n)
-		}
+		h.Logger.Warn("token: auth code replay detected", "client_id", req.clientID)
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "Authorization code already used")
 		return
 	}
@@ -337,7 +331,7 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 	}
 
 	// Issue tokens
-	h.issueTokens(w, req.clientID, ac.Scope, req.code)
+	h.issueTokens(w, req.clientID, ac.Scope)
 }
 
 func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
@@ -389,10 +383,10 @@ func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Issue new tokens (no auth code linkage for refresh-based issuance)
-	h.issueTokens(w, clientID, rt.Scope, "")
+	h.issueTokens(w, clientID, rt.Scope)
 }
 
-func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope, authCode string) {
+func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope string) {
 	accessToken, claims, err := h.Tokens.GenerateAccessToken(clientID, scope, AccessTokenTTL)
 	if err != nil {
 		h.Logger.Error("token: generating access token", "error", err)
@@ -409,7 +403,7 @@ func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope, authCode 
 
 	// Store refresh token — access tokens are stateless and not stored.
 	rfExpiry := time.Now().Add(RefreshTokenTTL)
-	if err := h.DB.StoreRefreshToken(refreshToken, clientID, scope, authCode, rfExpiry); err != nil {
+	if err := h.DB.StoreRefreshToken(refreshToken, clientID, scope, rfExpiry); err != nil {
 		h.Logger.Error("token: storing refresh token", "error", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return
