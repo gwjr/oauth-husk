@@ -93,6 +93,38 @@ func TestUpsertClient(t *testing.T) {
 	}
 }
 
+func TestLockRedirectURI(t *testing.T) {
+	db := testDB(t)
+
+	if err := db.CreateClient("client1", "hash", "", ""); err != nil {
+		t.Fatalf("CreateClient: %v", err)
+	}
+
+	locked, err := db.LockRedirectURI("client1", "https://example.com/cb")
+	if err != nil {
+		t.Fatalf("LockRedirectURI: %v", err)
+	}
+	if !locked {
+		t.Fatal("expected redirect URI to be locked on first call")
+	}
+
+	c, err := db.GetClient("client1")
+	if err != nil {
+		t.Fatalf("GetClient: %v", err)
+	}
+	if c.RedirectURI != "https://example.com/cb" {
+		t.Fatalf("expected redirect_uri to be set, got %s", c.RedirectURI)
+	}
+
+	locked, err = db.LockRedirectURI("client1", "https://evil.example.com/cb")
+	if err != nil {
+		t.Fatalf("LockRedirectURI (second): %v", err)
+	}
+	if locked {
+		t.Fatal("expected redirect URI not to change after lock")
+	}
+}
+
 func TestAuthCodeFlow(t *testing.T) {
 	db := testDB(t)
 	db.CreateClient("client1", "hash", "https://example.com/cb", "")
@@ -254,5 +286,82 @@ func TestCleanupExpired(t *testing.T) {
 	exists, _ := db.AccessTokenExists("expired-at")
 	if exists {
 		t.Error("expected expired token to be cleaned up")
+	}
+}
+
+func TestDeleteExpiredCodes(t *testing.T) {
+	db := testDB(t)
+	db.CreateClient("client1", "hash", "https://example.com/cb", "")
+
+	db.StoreAuthCode("expired-code", "client1", "https://example.com/cb", "ch", "", "", -1*time.Second)
+	db.StoreAuthCode("valid-code", "client1", "https://example.com/cb", "ch", "", "", 120*time.Second)
+
+	n, err := db.DeleteExpiredCodes()
+	if err != nil {
+		t.Fatalf("DeleteExpiredCodes: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 expired code deleted, got %d", n)
+	}
+
+	if ac, _ := db.GetAuthCode("expired-code"); ac != nil {
+		t.Fatal("expected expired code to be deleted")
+	}
+	if ac, _ := db.GetAuthCode("valid-code"); ac == nil {
+		t.Fatal("expected valid code to remain")
+	}
+}
+
+func TestDeleteExpiredTokens(t *testing.T) {
+	db := testDB(t)
+	db.CreateClient("client1", "hash", "https://example.com/cb", "")
+
+	expired := time.Now().Add(-1 * time.Hour)
+	valid := time.Now().Add(1 * time.Hour)
+
+	db.StoreAccessToken("expired-at", "client1", "", expired)
+	db.StoreAccessToken("valid-at", "client1", "", valid)
+	db.StoreRefreshToken("expired-rt", "client1", "expired-at", "", expired)
+	db.StoreRefreshToken("valid-rt", "client1", "valid-at", "", valid)
+
+	n, err := db.DeleteExpiredTokens()
+	if err != nil {
+		t.Fatalf("DeleteExpiredTokens: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 expired tokens deleted, got %d", n)
+	}
+
+	if exists, _ := db.AccessTokenExists("expired-at"); exists {
+		t.Fatal("expected expired access token to be deleted")
+	}
+	if exists, _ := db.AccessTokenExists("valid-at"); !exists {
+		t.Fatal("expected valid access token to remain")
+	}
+	if rt, _ := db.GetRefreshToken("expired-rt"); rt != nil {
+		t.Fatal("expected expired refresh token to be deleted")
+	}
+	if rt, _ := db.GetRefreshToken("valid-rt"); rt == nil {
+		t.Fatal("expected valid refresh token to remain")
+	}
+}
+
+func TestSigningKey(t *testing.T) {
+	db := testDB(t)
+
+	key1, err := db.SigningKey()
+	if err != nil {
+		t.Fatalf("SigningKey (first): %v", err)
+	}
+	if len(key1) != 32 {
+		t.Fatalf("expected 32-byte signing key, got %d", len(key1))
+	}
+
+	key2, err := db.SigningKey()
+	if err != nil {
+		t.Fatalf("SigningKey (second): %v", err)
+	}
+	if string(key1) != string(key2) {
+		t.Fatal("expected signing key to be stable across calls")
 	}
 }
