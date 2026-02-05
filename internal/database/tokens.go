@@ -31,10 +31,11 @@ func HashRefreshToken(raw string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (d *DB) StoreAccessToken(tokenID, clientID, scope string, expiresAt time.Time) error {
+func (d *DB) StoreAccessToken(tokenID, clientID, scope, authCode string, expiresAt time.Time) error {
+	codeHash := hashCode(authCode) // empty string hashes to a fixed value; harmless
 	_, err := d.db.Exec(
-		"INSERT INTO access_tokens (token_id, client_id, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
-		tokenID, clientID, scope, time.Now().Unix(), expiresAt.Unix(),
+		"INSERT INTO access_tokens (token_id, client_id, scope, auth_code, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+		tokenID, clientID, scope, codeHash, time.Now().Unix(), expiresAt.Unix(),
 	)
 	return err
 }
@@ -61,10 +62,11 @@ func (d *DB) RevokeAccessToken(tokenID string) error {
 }
 
 // StoreRefreshToken stores a refresh token by its SHA-256 hash.
-func (d *DB) StoreRefreshToken(rawToken, clientID, accessTokenID, scope string, expiresAt time.Time) error {
+func (d *DB) StoreRefreshToken(rawToken, clientID, accessTokenID, scope, authCode string, expiresAt time.Time) error {
+	codeHash := hashCode(authCode)
 	_, err := d.db.Exec(
-		"INSERT INTO refresh_tokens (token_hash, client_id, access_token_id, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-		HashRefreshToken(rawToken), clientID, accessTokenID, scope, time.Now().Unix(), expiresAt.Unix(),
+		"INSERT INTO refresh_tokens (token_hash, client_id, access_token_id, scope, auth_code, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		HashRefreshToken(rawToken), clientID, accessTokenID, scope, codeHash, time.Now().Unix(), expiresAt.Unix(),
 	)
 	return err
 }
@@ -96,6 +98,32 @@ func (d *DB) GetRefreshToken(rawToken string) (*RefreshToken, error) {
 func (d *DB) RevokeRefreshToken(rawToken string) error {
 	_, err := d.db.Exec("DELETE FROM refresh_tokens WHERE token_hash = ?", HashRefreshToken(rawToken))
 	return err
+}
+
+// RevokeTokensByAuthCode deletes all access and refresh tokens issued from a given auth code.
+func (d *DB) RevokeTokensByAuthCode(authCode string) (int64, error) {
+	if authCode == "" {
+		return 0, nil
+	}
+	codeHash := hashCode(authCode)
+	tx, err := d.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	res1, err := tx.Exec("DELETE FROM access_tokens WHERE auth_code = ?", codeHash)
+	if err != nil {
+		return 0, err
+	}
+	res2, err := tx.Exec("DELETE FROM refresh_tokens WHERE auth_code = ?", codeHash)
+	if err != nil {
+		return 0, err
+	}
+
+	n1, _ := res1.RowsAffected()
+	n2, _ := res2.RowsAffected()
+	return n1 + n2, tx.Commit()
 }
 
 func (d *DB) DeleteExpiredTokens() (int64, error) {

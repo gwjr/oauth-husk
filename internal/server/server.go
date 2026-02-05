@@ -18,15 +18,15 @@ const (
 	oauthRateLimitPerMin = 60
 )
 
-func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs []string) (*http.Server, error) {
+func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs []string) (*http.Server, *RateLimiter, error) {
 	signingKey, err := db.SigningKey()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	tokenSvc, err := oauth.NewTokenService(signingKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	h := &oauth.Handlers{
@@ -52,7 +52,7 @@ func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs [
 
 	allowed, err := parseAllowedCIDRs(allowedCIDRs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	limiter := newRateLimiter(oauthRateLimitPerMin, oauthRateLimitBurst)
 
@@ -78,7 +78,7 @@ func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs [
 		IdleTimeout:  120 * time.Second,
 	}
 
-	return srv, nil
+	return srv, limiter, nil
 }
 
 func isAllowedRemote(remoteAddr string, allowed []*net.IPNet) bool {
@@ -134,7 +134,7 @@ func isRateLimitedPath(path string) bool {
 	return path == "/authorize" || path == "/token"
 }
 
-type rateLimiter struct {
+type RateLimiter struct {
 	mu     sync.Mutex
 	rate   float64
 	burst  float64
@@ -146,15 +146,15 @@ type bucket struct {
 	last   time.Time
 }
 
-func newRateLimiter(perMin, burst int) *rateLimiter {
-	return &rateLimiter{
+func newRateLimiter(perMin, burst int) *RateLimiter {
+	return &RateLimiter{
 		rate:   float64(perMin) / 60.0,
 		burst:  float64(burst),
 		bucket: make(map[string]*bucket),
 	}
 }
 
-func (rl *rateLimiter) Allow(key string) bool {
+func (rl *RateLimiter) Allow(key string) bool {
 	if key == "" {
 		return false
 	}
@@ -181,6 +181,18 @@ func (rl *rateLimiter) Allow(key string) bool {
 	return true
 }
 
+// cleanup removes stale rate limiter entries that haven't been seen recently.
+func (rl *RateLimiter) cleanup(maxAge time.Duration) {
+	now := time.Now()
+	rl.mu.Lock()
+	for key, b := range rl.bucket {
+		if now.Sub(b.last) > maxAge {
+			delete(rl.bucket, key)
+		}
+	}
+	rl.mu.Unlock()
+}
+
 func min(a, b float64) float64 {
 	if a < b {
 		return a
@@ -188,8 +200,9 @@ func min(a, b float64) float64 {
 	return b
 }
 
-// StartCleanup runs periodic expired token/code cleanup. Cancel the context to stop.
-func StartCleanup(ctx context.Context, db *database.DB, logger *slog.Logger) {
+// StartCleanup runs periodic expired token/code cleanup and rate limiter pruning.
+// Cancel the context to stop.
+func StartCleanup(ctx context.Context, db *database.DB, limiter *RateLimiter, logger *slog.Logger) {
 	ticker := time.NewTicker(1 * time.Hour)
 	go func() {
 		for {
@@ -202,6 +215,9 @@ func StartCleanup(ctx context.Context, db *database.DB, logger *slog.Logger) {
 					logger.Error("cleanup: failed", "error", err)
 				} else {
 					logger.Debug("cleanup: completed")
+				}
+				if limiter != nil {
+					limiter.cleanup(10 * time.Minute)
 				}
 			}
 		}

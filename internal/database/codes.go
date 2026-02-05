@@ -1,7 +1,9 @@
 package database
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"time"
 )
@@ -19,12 +21,18 @@ type AuthCode struct {
 	UsedAt              *time.Time
 }
 
+// hashCode returns the SHA-256 hex digest of a raw auth code.
+func hashCode(raw string) string {
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:])
+}
+
 func (d *DB) StoreAuthCode(code, clientID, redirectURI, codeChallenge, scope, resource string, ttl time.Duration) error {
 	now := time.Now()
 	_, err := d.db.Exec(
 		`INSERT INTO auth_codes (code, client_id, redirect_uri, code_challenge, code_challenge_method, scope, resource, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, 'S256', ?, ?, ?, ?)`,
-		code, clientID, redirectURI, codeChallenge, scope, resource, now.Unix(), now.Add(ttl).Unix(),
+		hashCode(code), clientID, redirectURI, codeChallenge, scope, resource, now.Unix(), now.Add(ttl).Unix(),
 	)
 	return err
 }
@@ -33,7 +41,7 @@ func (d *DB) GetAuthCode(code string) (*AuthCode, error) {
 	row := d.db.QueryRow(
 		`SELECT code, client_id, redirect_uri, code_challenge, code_challenge_method, scope, resource, created_at, expires_at, used_at
 		 FROM auth_codes WHERE code = ?`,
-		code,
+		hashCode(code),
 	)
 
 	var ac AuthCode
@@ -61,7 +69,7 @@ func (d *DB) GetAuthCode(code string) (*AuthCode, error) {
 func (d *DB) MarkCodeUsed(code string) error {
 	res, err := d.db.Exec(
 		"UPDATE auth_codes SET used_at = ? WHERE code = ? AND used_at IS NULL",
-		time.Now().Unix(), code,
+		time.Now().Unix(), hashCode(code),
 	)
 	if err != nil {
 		return err

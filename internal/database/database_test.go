@@ -173,7 +173,7 @@ func TestTokenRevocation(t *testing.T) {
 
 	// Store access token
 	expires := time.Now().Add(24 * time.Hour)
-	if err := db.StoreAccessToken("token1", "client1", "mcp:tools", expires); err != nil {
+	if err := db.StoreAccessToken("token1", "client1", "mcp:tools", "", expires); err != nil {
 		t.Fatalf("StoreAccessToken: %v", err)
 	}
 
@@ -203,7 +203,7 @@ func TestRefreshTokenCRUD(t *testing.T) {
 	db.CreateClient("client1", "hash", "https://example.com/cb", "")
 
 	expires := time.Now().Add(30 * 24 * time.Hour)
-	if err := db.StoreRefreshToken("raw-refresh-token", "client1", "at1", "mcp:tools", expires); err != nil {
+	if err := db.StoreRefreshToken("raw-refresh-token", "client1", "at1", "mcp:tools", "", expires); err != nil {
 		t.Fatalf("StoreRefreshToken: %v", err)
 	}
 
@@ -246,9 +246,9 @@ func TestRevokeClientTokens(t *testing.T) {
 	db.CreateClient("client1", "hash", "https://example.com/cb", "")
 
 	expires := time.Now().Add(24 * time.Hour)
-	db.StoreAccessToken("at1", "client1", "", expires)
-	db.StoreAccessToken("at2", "client1", "", expires)
-	db.StoreRefreshToken("rt1", "client1", "at1", "", expires)
+	db.StoreAccessToken("at1", "client1", "", "", expires)
+	db.StoreAccessToken("at2", "client1", "", "", expires)
+	db.StoreRefreshToken("rt1", "client1", "at1", "", "", expires)
 
 	n, err := db.RevokeClientTokens("client1")
 	if err != nil {
@@ -272,7 +272,7 @@ func TestCleanupExpired(t *testing.T) {
 	db.StoreAuthCode("expired-code", "client1", "https://example.com/cb", "ch", "", "", -1*time.Second)
 
 	// Store expired token
-	db.StoreAccessToken("expired-at", "client1", "", time.Now().Add(-1*time.Hour))
+	db.StoreAccessToken("expired-at", "client1", "", "", time.Now().Add(-1*time.Hour))
 
 	if err := db.CleanupExpired(); err != nil {
 		t.Fatal(err)
@@ -319,10 +319,10 @@ func TestDeleteExpiredTokens(t *testing.T) {
 	expired := time.Now().Add(-1 * time.Hour)
 	valid := time.Now().Add(1 * time.Hour)
 
-	db.StoreAccessToken("expired-at", "client1", "", expired)
-	db.StoreAccessToken("valid-at", "client1", "", valid)
-	db.StoreRefreshToken("expired-rt", "client1", "expired-at", "", expired)
-	db.StoreRefreshToken("valid-rt", "client1", "valid-at", "", valid)
+	db.StoreAccessToken("expired-at", "client1", "", "", expired)
+	db.StoreAccessToken("valid-at", "client1", "", "", valid)
+	db.StoreRefreshToken("expired-rt", "client1", "expired-at", "", "", expired)
+	db.StoreRefreshToken("valid-rt", "client1", "valid-at", "", "", valid)
 
 	n, err := db.DeleteExpiredTokens()
 	if err != nil {
