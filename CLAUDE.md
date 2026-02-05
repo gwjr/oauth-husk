@@ -58,6 +58,7 @@ Caddyfile                       # Example Caddy config with forward_auth pattern
 No config file. CLI flags only:
 - `serve`: `--host` (default 127.0.0.1), `--port` (default 8200), `--db` (default `~/.config/oauth-husk/oauth.db`)
 - `install`: `--port`, `--db`
+- `serve` and `install`: `--allow-from` (comma-separated CIDRs/IPs; default loopback only)
 
 The signing key is auto-generated and stored in the SQLite database on first run. Client commands prompt to install the launchd service if not already installed.
 

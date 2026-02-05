@@ -49,7 +49,7 @@ oauth-husk client list          List registered clients
 oauth-husk client revoke <id>   Revoke all tokens for a client
 ```
 
-`serve` and `install` accept `--port` (default 8200) and `--db` (default `~/.config/oauth-husk/oauth.db`). The database and signing key are created automatically on first run.
+`serve` and `install` accept `--port` (default 8200), `--db` (default `~/.config/oauth-husk/oauth.db`), and `--allow-from` (comma-separated CIDRs/IPs; default loopback only, e.g. `--allow-from 127.0.0.0/8,::1/128,172.18.0.0/16` for Docker). The database and signing key are created automatically on first run.
 
 ## Caddy setup
 

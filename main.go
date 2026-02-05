@@ -76,6 +76,7 @@ func cmdServe(args []string) {
 	host := fs.String("host", "127.0.0.1", "listen host")
 	port := fs.Int("port", 8200, "listen port")
 	dbPath := fs.String("db", config.DefaultDBPath(), "SQLite database path")
+	allowFrom := fs.String("allow-from", "", "comma-separated CIDRs/IPs allowed to access (default loopback only)")
 	fs.Parse(args)
 
 	*dbPath = config.ExpandTilde(*dbPath)
@@ -90,7 +91,11 @@ func cmdServe(args []string) {
 	}
 	defer db.Close()
 
-	srv, err := server.New(addr, db, logger)
+	var allowedCIDRs []string
+	if *allowFrom != "" {
+		allowedCIDRs = strings.Split(*allowFrom, ",")
+	}
+	srv, err := server.New(addr, db, logger, allowedCIDRs)
 	if err != nil {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
@@ -281,6 +286,7 @@ func cmdInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	port := fs.Int("port", 8200, "listen port")
 	dbPath := fs.String("db", config.DefaultDBPath(), "SQLite database path")
+	allowFrom := fs.String("allow-from", "", "comma-separated CIDRs/IPs allowed to access (default loopback only)")
 	fs.Parse(args)
 
 	exe, err := os.Executable()
@@ -319,6 +325,8 @@ func cmdInstall(args []string) {
 		<string>%d</string>
 		<string>--db</string>
 		<string>%s</string>
+		<string>--allow-from</string>
+		<string>%s</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -330,7 +338,7 @@ func cmdInstall(args []string) {
 	<string>%s</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(exe), *port, xmlEscape(*dbPath),
+`, launchdLabel, xmlEscape(exe), *port, xmlEscape(*dbPath), xmlEscape(*allowFrom),
 		xmlEscape(filepath.Join(logDir, "oauth-husk.out")),
 		xmlEscape(filepath.Join(logDir, "oauth-husk.err")))
 

@@ -108,38 +108,41 @@ func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
 
 	// Validate redirect_uri scheme — must be https
 	parsedRedirect, err := url.Parse(redirectURI)
-	if err != nil || parsedRedirect.Scheme != "https" {
+	if err != nil || parsedRedirect.Scheme != "https" || parsedRedirect.Host == "" {
 		h.Logger.Warn("authorize: non-https redirect_uri", "client_id", clientID, "redirect_uri", redirectURI)
 		http.Error(w, "Invalid redirect URI: must use https", http.StatusBadRequest)
 		return
 	}
 
-	// Strip query from redirect_uri for comparison/storage (base URI only)
-	parsedRedirect.RawQuery = ""
-	parsedRedirect.Fragment = ""
-	redirectBase := parsedRedirect.String()
+	// Reject fragments and lock the full redirect URI (including query)
+	if parsedRedirect.Fragment != "" {
+		h.Logger.Warn("authorize: redirect_uri contains fragment", "client_id", clientID, "redirect_uri", redirectURI)
+		http.Error(w, "Invalid redirect URI: fragment not allowed", http.StatusBadRequest)
+		return
+	}
+	redirectFull := parsedRedirect.String()
 
 	// Validate redirect_uri: exact match if locked, or lock on first use
 	if client.RedirectURI == "" {
 		// First authorization — lock this redirect URI for the client
-		locked, err := h.DB.LockRedirectURI(clientID, redirectBase)
+		locked, err := h.DB.LockRedirectURI(clientID, redirectFull)
 		if err != nil {
 			h.Logger.Error("authorize: locking redirect_uri", "error", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
 		if locked {
-			h.Logger.Info("authorize: locked redirect_uri", "client_id", clientID, "redirect_uri", redirectBase)
+			h.Logger.Info("authorize: locked redirect_uri", "client_id", clientID, "redirect_uri", redirectFull)
 		} else {
 			// Race: another request locked it first — re-fetch and validate
 			client, _ = h.DB.GetClient(clientID)
-			if client == nil || redirectBase != client.RedirectURI {
+			if client == nil || redirectFull != client.RedirectURI {
 				http.Error(w, "Invalid redirect URI", http.StatusBadRequest)
 				return
 			}
 		}
-	} else if redirectBase != client.RedirectURI {
-		h.Logger.Warn("authorize: redirect_uri mismatch", "client_id", clientID, "got", redirectBase, "want", client.RedirectURI)
+	} else if redirectFull != client.RedirectURI {
+		h.Logger.Warn("authorize: redirect_uri mismatch", "client_id", clientID, "got", redirectFull, "want", client.RedirectURI)
 		http.Error(w, "Invalid redirect URI", http.StatusBadRequest)
 		return
 	}

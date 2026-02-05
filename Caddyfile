@@ -3,13 +3,23 @@
 
 	@oauth path /.well-known/oauth-protected-resource /.well-known/oauth-authorization-server /authorize /token
 	handle @oauth {
-		reverse_proxy localhost:8200
+		header {
+			-X-Forwarded-Host
+			-X-Forwarded-Proto
+			-X-Forwarded-For
+		}
+		reverse_proxy localhost:8200 {
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+		}
 	}
 
 	@mcp path /mcp /sse /messages
 	handle @mcp {
 		forward_auth localhost:8200 {
 			uri /auth/verify
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
 		}
 		reverse_proxy localhost:8105
 	}
