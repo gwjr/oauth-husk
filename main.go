@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -23,43 +24,77 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+	cli := &CLI{
+		In:  os.Stdin,
+		Out: os.Stdout,
+		Err: os.Stderr,
 	}
-
-	switch os.Args[1] {
-	case "serve":
-		cmdServe(os.Args[2:])
-	case "install":
-		cmdInstall(os.Args[2:])
-	case "uninstall":
-		cmdUninstall()
-	case "client":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: oauth-husk client <add|list|revoke>")
-			os.Exit(1)
-		}
-		switch os.Args[2] {
-		case "add":
-			cmdClientAdd(os.Args[3:])
-		case "list":
-			cmdClientList(os.Args[3:])
-		case "revoke":
-			cmdClientRevoke(os.Args[3:])
-		default:
-			fmt.Fprintf(os.Stderr, "Unknown client subcommand: %s\n", os.Args[2])
-			os.Exit(1)
-		}
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
-		printUsage()
-		os.Exit(1)
-	}
+	os.Exit(cli.Run(os.Args))
 }
 
-func printUsage() {
-	fmt.Fprintln(os.Stderr, `Usage: oauth-husk <command>
+type CLI struct {
+	In  io.Reader
+	Out io.Writer
+	Err io.Writer
+}
+
+func (c *CLI) Run(args []string) int {
+	if len(args) < 2 {
+		c.printUsage()
+		return 1
+	}
+
+	switch args[1] {
+	case "serve":
+		if err := c.cmdServe(args[2:]); err != nil {
+			fmt.Fprintln(c.Err, err)
+			return 1
+		}
+	case "install":
+		if err := c.cmdInstall(args[2:]); err != nil {
+			fmt.Fprintln(c.Err, err)
+			return 1
+		}
+	case "uninstall":
+		if err := c.cmdUninstall(); err != nil {
+			fmt.Fprintln(c.Err, err)
+			return 1
+		}
+	case "client":
+		if len(args) < 3 {
+			fmt.Fprintln(c.Err, "Usage: oauth-husk client <add|list|revoke>")
+			return 1
+		}
+		switch args[2] {
+		case "add":
+			if err := c.cmdClientAdd(args[3:]); err != nil {
+				fmt.Fprintln(c.Err, err)
+				return 1
+			}
+		case "list":
+			if err := c.cmdClientList(args[3:]); err != nil {
+				fmt.Fprintln(c.Err, err)
+				return 1
+			}
+		case "revoke":
+			if err := c.cmdClientRevoke(args[3:]); err != nil {
+				fmt.Fprintln(c.Err, err)
+				return 1
+			}
+		default:
+			fmt.Fprintf(c.Err, "Unknown client subcommand: %s\n", args[2])
+			return 1
+		}
+	default:
+		fmt.Fprintf(c.Err, "Unknown command: %s\n", args[1])
+		c.printUsage()
+		return 1
+	}
+	return 0
+}
+
+func (c *CLI) printUsage() {
+	fmt.Fprintln(c.Err, `Usage: oauth-husk <command>
 
 Commands:
   serve             Start the OAuth server
@@ -70,39 +105,67 @@ Commands:
   client revoke     Revoke all tokens for a client`)
 }
 
-func cmdServe(args []string) {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+type serveConfig struct {
+	host        string
+	port        int
+	dbPath      string
+	allowFrom   []string
+	cleanupFreq time.Duration
+}
+
+type installConfig struct {
+	port      int
+	dbPath    string
+	allowFrom []string
+}
+
+func (c *CLI) parseServeConfig(args []string) (serveConfig, error) {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(c.Err)
 	host := fs.String("host", "127.0.0.1", "listen host")
 	port := fs.Int("port", 8200, "listen port")
 	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
 	allowFrom := fs.String("allow-from", "", "comma-separated CIDRs/IPs allowed to access (default loopback only)")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return serveConfig{}, err
+	}
 
-	*dbPath = expandTilde(*dbPath)
-	addr := listenAddr(*host, *port)
+	cfg := serveConfig{
+		host:        *host,
+		port:        *port,
+		dbPath:      expandTilde(*dbPath),
+		allowFrom:   defaultAllowedCIDRs(),
+		cleanupFreq: time.Hour,
+	}
+	if *allowFrom != "" {
+		cfg.allowFrom = strings.Split(*allowFrom, ",")
+	}
+	return cfg, nil
+}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	db, err := database.Open(*dbPath)
+func (c *CLI) cmdServe(args []string) error {
+	cfg, err := c.parseServeConfig(args)
 	if err != nil {
-		logger.Error("failed to open database", "error", err)
-		os.Exit(1)
+		return err
+	}
+
+	addr := listenAddr(cfg.host, cfg.port)
+	logger := slog.New(slog.NewJSONHandler(c.Out, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	db, err := database.Open(cfg.dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer db.Close()
 
-	allowedCIDRs := defaultAllowedCIDRs()
-	if *allowFrom != "" {
-		allowedCIDRs = strings.Split(*allowFrom, ",")
-	}
-	svc, err := server.New(addr, db, logger, allowedCIDRs)
+	svc, err := server.New(addr, db, logger, cfg.allowFrom)
 	if err != nil {
-		logger.Error("failed to create server", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create server: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server.StartCleanup(ctx, db, svc.Limiter, logger)
+	server.StartCleanup(ctx, db, svc.Limiter, logger, cfg.cleanupFreq)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -111,7 +174,6 @@ func cmdServe(args []string) {
 		logger.Info("server starting", "addr", addr)
 		if err := svc.HTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "error", err)
-			os.Exit(1)
 		}
 	}()
 
@@ -125,79 +187,105 @@ func cmdServe(args []string) {
 		logger.Error("shutdown error", "error", err)
 	}
 	logger.Info("server stopped")
+	return nil
 }
 
-func cmdClientAdd(args []string) {
-	promptInstall()
+func (c *CLI) parseInstallConfig(args []string) (installConfig, error) {
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	fs.SetOutput(c.Err)
+	port := fs.Int("port", 8200, "listen port")
+	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
+	allowFrom := fs.String("allow-from", "", "comma-separated CIDRs/IPs allowed to access (default loopback only)")
+	if err := fs.Parse(args); err != nil {
+		return installConfig{}, err
+	}
 
-	fs := flag.NewFlagSet("client add", flag.ExitOnError)
+	cfg := installConfig{
+		port:      *port,
+		dbPath:    expandTilde(*dbPath),
+		allowFrom: defaultAllowedCIDRs(),
+	}
+	if *allowFrom != "" {
+		cfg.allowFrom = strings.Split(*allowFrom, ",")
+	}
+	return cfg, nil
+}
+
+func (c *CLI) cmdClientAdd(args []string) error {
+	if err := c.promptInstall(); err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("client add", flag.ContinueOnError)
+	fs.SetOutput(c.Err)
 	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
 	redirectURI := fs.String("redirect-uri", "", "redirect URI (locked on first auth if omitted)")
 	description := fs.String("description", "", "description")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: oauth-husk client add <client-id> [--redirect-uri URI] [--description TEXT]")
-		os.Exit(1)
+		return fmt.Errorf("usage: oauth-husk client add <client-id> [--redirect-uri URI] [--description TEXT]")
 	}
 	clientID := fs.Arg(0)
 
 	db, err := database.Open(expandTilde(*dbPath))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error opening database: %w", err)
 	}
 	defer db.Close()
 
 	secret, err := oauth.GenerateSecret()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error generating secret: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error generating secret: %w", err)
 	}
 
 	hash, err := oauth.HashSecret(secret)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error hashing secret: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error hashing secret: %w", err)
 	}
 
 	if err := db.CreateClient(clientID, hash, *redirectURI, *description); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating client: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error creating client: %w", err)
 	}
 
-	fmt.Printf("Client created: %s\n", clientID)
-	fmt.Printf("Secret:         %s\n", secret)
-	fmt.Println()
-	fmt.Println("Save this secret now — it cannot be recovered.")
+	fmt.Fprintf(c.Out, "Client created: %s\n", clientID)
+	fmt.Fprintf(c.Out, "Secret:         %s\n", secret)
+	fmt.Fprintln(c.Out)
+	fmt.Fprintln(c.Out, "Save this secret now — it cannot be recovered.")
+	return nil
 }
 
-func cmdClientList(args []string) {
-	promptInstall()
+func (c *CLI) cmdClientList(args []string) error {
+	if err := c.promptInstall(); err != nil {
+		return err
+	}
 
-	fs := flag.NewFlagSet("client list", flag.ExitOnError)
+	fs := flag.NewFlagSet("client list", flag.ContinueOnError)
+	fs.SetOutput(c.Err)
 	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	db, err := database.Open(expandTilde(*dbPath))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error opening database: %w", err)
 	}
 	defer db.Close()
 
 	clients, err := db.ListClients()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error listing clients: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error listing clients: %w", err)
 	}
 
 	if len(clients) == 0 {
-		fmt.Println("No clients registered")
-		return
+		fmt.Fprintln(c.Out, "No clients registered")
+		return nil
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	tw := tabwriter.NewWriter(c.Out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "CLIENT ID\tREDIRECT URI\tCREATED\tDESCRIPTION")
 	for _, c := range clients {
 		uri := c.RedirectURI
@@ -207,35 +295,39 @@ func cmdClientList(args []string) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", c.ClientID, uri, c.CreatedAt.Format(time.RFC3339), c.Description)
 	}
 	tw.Flush()
+	return nil
 }
 
-func cmdClientRevoke(args []string) {
-	promptInstall()
+func (c *CLI) cmdClientRevoke(args []string) error {
+	if err := c.promptInstall(); err != nil {
+		return err
+	}
 
-	fs := flag.NewFlagSet("client revoke", flag.ExitOnError)
+	fs := flag.NewFlagSet("client revoke", flag.ContinueOnError)
+	fs.SetOutput(c.Err)
 	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: oauth-husk client revoke <client-id>")
-		os.Exit(1)
+		return fmt.Errorf("usage: oauth-husk client revoke <client-id>")
 	}
 	clientID := fs.Arg(0)
 
 	db, err := database.Open(expandTilde(*dbPath))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error opening database: %w", err)
 	}
 	defer db.Close()
 
 	n, err := db.RevokeClientTokens(clientID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error revoking tokens: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error revoking tokens: %w", err)
 	}
 
-	fmt.Printf("Revoked %d token(s) for client '%s'\n", n, clientID)
+	fmt.Fprintf(c.Out, "Revoked %d token(s) for client '%s'\n", n, clientID)
+	return nil
 }
 
 // isInstalled checks whether the launchd plist exists.
@@ -246,25 +338,26 @@ func isInstalled() bool {
 
 // promptInstall checks if the service is installed and, if not, asks the user
 // whether to install it now. Returns true if the user declined (caller should exit).
-func promptInstall() {
+func (c *CLI) promptInstall() error {
 	if isInstalled() {
-		return
+		return nil
 	}
-	fmt.Fprintln(os.Stderr, "The oauth-husk service is not installed as a launchd agent.")
-	fmt.Fprint(os.Stderr, "Install and start it now? [y/N] ")
-	reader := bufio.NewReader(os.Stdin)
+	fmt.Fprintln(c.Err, "The oauth-husk service is not installed as a launchd agent.")
+	fmt.Fprint(c.Err, "Install and start it now? [y/N] ")
+	reader := bufio.NewReader(c.In)
 	answer, err := reader.ReadString('\n')
 	if err != nil {
 		// EOF or pipe — don't auto-install
-		fmt.Fprintln(os.Stderr, "\nSkipping install. Run 'oauth-husk install' when ready.")
-		return
+		fmt.Fprintln(c.Err, "\nSkipping install. Run 'oauth-husk install' when ready.")
+		return nil
 	}
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer == "y" || answer == "yes" {
-		cmdInstall(nil)
+		return c.cmdInstall(nil)
 	} else {
-		fmt.Fprintln(os.Stderr, "Skipping install. Run 'oauth-husk install' when ready.")
+		fmt.Fprintln(c.Err, "Skipping install. Run 'oauth-husk install' when ready.")
 	}
+	return nil
 }
 
 const launchdLabel = "uk.gwjr.oauth-husk"
@@ -281,33 +374,28 @@ func xmlEscape(s string) string {
 	return b.String()
 }
 
-func cmdInstall(args []string) {
-	fs := flag.NewFlagSet("install", flag.ExitOnError)
-	port := fs.Int("port", 8200, "listen port")
-	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
-	allowFrom := fs.String("allow-from", "", "comma-separated CIDRs/IPs allowed to access (default loopback only)")
-	fs.Parse(args)
+func (c *CLI) cmdInstall(args []string) error {
+	cfg, err := c.parseInstallConfig(args)
+	if err != nil {
+		return err
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding executable path: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error finding executable path: %w", err)
 	}
 	exe, err = filepath.EvalSymlinks(exe)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error resolving executable path: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error resolving executable path: %w", err)
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding home directory: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error finding home directory: %w", err)
 	}
 	logDir := filepath.Join(home, "Library", "Logs", "oauth-husk")
 	if err := os.MkdirAll(logDir, 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating log directory: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error creating log directory: %w", err)
 	}
 
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
@@ -337,7 +425,7 @@ func cmdInstall(args []string) {
 	<string>%s</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(exe), *port, xmlEscape(*dbPath), xmlEscape(*allowFrom),
+`, launchdLabel, xmlEscape(exe), cfg.port, xmlEscape(cfg.dbPath), xmlEscape(strings.Join(cfg.allowFrom, ",")),
 		xmlEscape(filepath.Join(logDir, "oauth-husk.out")),
 		xmlEscape(filepath.Join(logDir, "oauth-husk.err")))
 
@@ -347,44 +435,42 @@ func cmdInstall(args []string) {
 	exec.Command("launchctl", "unload", dest).Run()
 
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating LaunchAgents directory: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error creating LaunchAgents directory: %w", err)
 	}
 
 	if err := os.WriteFile(dest, []byte(plist), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing plist: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error writing plist: %w", err)
 	}
 
 	if out, err := exec.Command("launchctl", "load", dest).CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading plist: %v\n%s\n", err, out)
-		os.Exit(1)
+		return fmt.Errorf("error loading plist: %v\n%s", err, out)
 	}
 
-	fmt.Printf("Installed and started %s\n", launchdLabel)
-	fmt.Printf("  Plist:  %s\n", dest)
-	fmt.Printf("  Binary: %s\n", exe)
-	fmt.Printf("  Port:   %d\n", *port)
+	fmt.Fprintf(c.Out, "Installed and started %s\n", launchdLabel)
+	fmt.Fprintf(c.Out, "  Plist:  %s\n", dest)
+	fmt.Fprintf(c.Out, "  Binary: %s\n", exe)
+	fmt.Fprintf(c.Out, "  Port:   %d\n", cfg.port)
+	return nil
 }
 
-func cmdUninstall() {
+func (c *CLI) cmdUninstall() error {
 	dest := plistPath()
 
 	if _, err := os.Stat(dest); os.IsNotExist(err) {
-		fmt.Println("Not installed")
-		return
+		fmt.Fprintln(c.Out, "Not installed")
+		return nil
 	}
 
 	if out, err := exec.Command("launchctl", "unload", dest).CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error unloading plist: %v\n%s\n", err, out)
+		fmt.Fprintf(c.Err, "Error unloading plist: %v\n%s\n", err, out)
 	}
 
 	if err := os.Remove(dest); err != nil {
-		fmt.Fprintf(os.Stderr, "Error removing plist: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error removing plist: %w", err)
 	}
 
-	fmt.Printf("Uninstalled %s\n", launchdLabel)
+	fmt.Fprintf(c.Out, "Uninstalled %s\n", launchdLabel)
+	return nil
 }
 
 func listenAddr(host string, port int) string {

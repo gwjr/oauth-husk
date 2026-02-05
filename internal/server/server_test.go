@@ -105,7 +105,7 @@ func TestStartCleanupStops(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx, cancel := context.WithCancel(context.Background())
-	StartCleanup(ctx, db, nil, logger)
+	StartCleanup(ctx, db, nil, logger, 10*time.Millisecond)
 	cancel()
 
 	time.Sleep(10 * time.Millisecond)

@@ -197,8 +197,11 @@ func (rl *RateLimiter) cleanup(maxAge time.Duration) {
 
 // StartCleanup runs periodic expired token/code cleanup and rate limiter pruning.
 // Cancel the context to stop.
-func StartCleanup(ctx context.Context, db *database.DB, limiter *RateLimiter, logger *slog.Logger) {
-	ticker := time.NewTicker(1 * time.Hour)
+func StartCleanup(ctx context.Context, db *database.DB, limiter *RateLimiter, logger *slog.Logger, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	ticker := time.NewTicker(interval)
 	go func() {
 		for {
 			select {

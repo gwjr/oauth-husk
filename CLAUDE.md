@@ -46,7 +46,6 @@ go test -run TestPKCE ./...    # single test by name
 ```
 main.go                         # CLI entry point (serve, install/uninstall, client add/list/revoke)
 internal/
-  config/config.go              # Utility functions: DefaultDBPath, ListenAddr, ExpandTilde
   database/{database,clients,codes,tokens}.go  # SQLite connection, migrations, CRUD
   oauth/{handlers,pkce,tokens}.go              # HTTP handlers, PKCE validation, token gen/verify
   server/server.go              # HTTP server setup, routing, CORS, cleanup

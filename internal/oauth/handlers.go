@@ -44,6 +44,70 @@ type Handlers struct {
 	Logger *slog.Logger
 }
 
+type authorizeRequest struct {
+	clientID            string
+	redirectURI         string
+	responseType        string
+	state               string
+	codeChallenge       string
+	codeChallengeMethod string
+	scope               string
+}
+
+type tokenRequest struct {
+	clientID     string
+	clientSecret string
+	code         string
+	redirectURI  string
+	codeVerifier string
+}
+
+func parseAuthorizeRequest(r *http.Request) authorizeRequest {
+	q := r.URL.Query()
+	return authorizeRequest{
+		clientID:            q.Get("client_id"),
+		redirectURI:         q.Get("redirect_uri"),
+		responseType:        q.Get("response_type"),
+		state:               q.Get("state"),
+		codeChallenge:       q.Get("code_challenge"),
+		codeChallengeMethod: q.Get("code_challenge_method"),
+		scope:               q.Get("scope"),
+	}
+}
+
+func parseTokenRequest(r *http.Request) tokenRequest {
+	return tokenRequest{
+		clientID:     r.FormValue("client_id"),
+		clientSecret: r.FormValue("client_secret"),
+		code:         r.FormValue("code"),
+		redirectURI:  r.FormValue("redirect_uri"),
+		codeVerifier: r.FormValue("code_verifier"),
+	}
+}
+
+func validateScopes(scope string) (string, error) {
+	if scope == "" {
+		return scope, nil
+	}
+	for _, s := range strings.Split(scope, " ") {
+		if !validScopes[s] {
+			return scope, fmt.Errorf("Unknown scope: %s", s)
+		}
+	}
+	return scope, nil
+}
+
+func validateRedirectURI(raw string) (string, error) {
+	parsedRedirect, err := url.Parse(raw)
+	if err != nil || parsedRedirect.Scheme != "https" || parsedRedirect.Host == "" {
+		return "", fmt.Errorf("Invalid redirect URI: must use https")
+	}
+	if parsedRedirect.Fragment != "" {
+		return "", fmt.Errorf("Invalid redirect URI: fragment not allowed")
+	}
+	return parsedRedirect.String(), nil
+}
+
 // baseURL derives the external base URL from the request headers.
 // Caddy sets X-Forwarded-Host and X-Forwarded-Proto.
 func baseURL(r *http.Request) string {
@@ -86,88 +150,69 @@ func (h *Handlers) AuthorizationServerMetadata(w http.ResponseWriter, r *http.Re
 
 // Authorize handles GET /authorize
 func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	clientID := q.Get("client_id")
-	redirectURI := q.Get("redirect_uri")
-	responseType := q.Get("response_type")
-	state := q.Get("state")
-	codeChallenge := q.Get("code_challenge")
-	codeChallengeMethod := q.Get("code_challenge_method")
-	scope := q.Get("scope")
+	req := parseAuthorizeRequest(r)
 
 	// Validate client_id
-	client, err := h.DB.GetClient(clientID)
+	client, err := h.DB.GetClient(req.clientID)
 	if err != nil {
 		h.Logger.Error("authorize: db error", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 	if client == nil {
-		h.Logger.Warn("authorize: unknown client_id", "client_id", clientID)
+		h.Logger.Warn("authorize: unknown client_id", "client_id", req.clientID)
 		http.Error(w, "Unknown client", http.StatusUnauthorized)
 		return
 	}
 
-	// Validate redirect_uri scheme — must be https
-	parsedRedirect, err := url.Parse(redirectURI)
-	if err != nil || parsedRedirect.Scheme != "https" || parsedRedirect.Host == "" {
-		h.Logger.Warn("authorize: non-https redirect_uri", "client_id", clientID, "redirect_uri", redirectURI)
-		http.Error(w, "Invalid redirect URI: must use https", http.StatusBadRequest)
+	redirectFull, err := validateRedirectURI(req.redirectURI)
+	if err != nil {
+		h.Logger.Warn("authorize: invalid redirect_uri", "client_id", req.clientID, "redirect_uri", req.redirectURI)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	// Reject fragments and lock the full redirect URI (including query)
-	if parsedRedirect.Fragment != "" {
-		h.Logger.Warn("authorize: redirect_uri contains fragment", "client_id", clientID, "redirect_uri", redirectURI)
-		http.Error(w, "Invalid redirect URI: fragment not allowed", http.StatusBadRequest)
-		return
-	}
-	redirectFull := parsedRedirect.String()
 
 	// Validate redirect_uri: exact match if locked; accept any valid HTTPS URI if unlocked.
 	// Deliberate design choice: redirect_uri is locked on first successful token exchange
 	// (not here), so that only a caller who presents the correct client_secret can lock it.
 	// See tokenAuthorizationCode for the lock-on-first-use logic.
 	if client.RedirectURI != "" && redirectFull != client.RedirectURI {
-		h.Logger.Warn("authorize: redirect_uri mismatch", "client_id", clientID, "got", redirectFull, "want", client.RedirectURI)
+		h.Logger.Warn("authorize: redirect_uri mismatch", "client_id", req.clientID, "got", redirectFull, "want", client.RedirectURI)
 		http.Error(w, "Invalid redirect URI", http.StatusBadRequest)
 		return
 	}
 
 	// From here on, errors redirect back to redirect_uri with error params
 	redirectError := func(errCode, desc string) {
-		u, _ := url.Parse(redirectURI)
+		u, _ := url.Parse(req.redirectURI)
 		params := u.Query()
 		params.Set("error", errCode)
 		params.Set("error_description", desc)
-		if state != "" {
-			params.Set("state", state)
+		if req.state != "" {
+			params.Set("state", req.state)
 		}
 		u.RawQuery = params.Encode()
 		http.Redirect(w, r, u.String(), http.StatusFound)
 	}
 
-	if responseType != "code" {
+	if req.responseType != "code" {
 		redirectError("unsupported_response_type", "Only 'code' response type is supported")
 		return
 	}
-	if codeChallengeMethod != "S256" {
+	if req.codeChallengeMethod != "S256" {
 		redirectError("invalid_request", "Only S256 code_challenge_method is supported")
 		return
 	}
-	if codeChallenge == "" {
+	if req.codeChallenge == "" {
 		redirectError("invalid_request", "code_challenge is required")
 		return
 	}
 
 	// Validate scope
-	if scope != "" {
-		for _, s := range strings.Split(scope, " ") {
-			if !validScopes[s] {
-				redirectError("invalid_scope", fmt.Sprintf("Unknown scope: %s", s))
-				return
-			}
-		}
+	scope, err := validateScopes(req.scope)
+	if err != nil {
+		redirectError("invalid_scope", err.Error())
+		return
 	}
 
 	// Generate auth code
@@ -178,20 +223,20 @@ func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.DB.StoreAuthCode(code, clientID, redirectURI, codeChallenge, scope, authCodeTTL); err != nil {
+	if err := h.DB.StoreAuthCode(code, req.clientID, req.redirectURI, req.codeChallenge, scope, authCodeTTL); err != nil {
 		h.Logger.Error("authorize: storing code", "error", err)
 		redirectError("server_error", "Failed to store authorization code")
 		return
 	}
 
-	h.Logger.Info("authorize: code issued", "client_id", clientID, "scope", scope)
+	h.Logger.Info("authorize: code issued", "client_id", req.clientID, "scope", scope)
 
 	// Redirect with code and state
-	u, _ := url.Parse(redirectURI)
+	u, _ := url.Parse(req.redirectURI)
 	params := u.Query()
 	params.Set("code", code)
-	if state != "" {
-		params.Set("state", state)
+	if req.state != "" {
+		params.Set("state", req.state)
 	}
 	u.RawQuery = params.Encode()
 	http.Redirect(w, r, u.String(), http.StatusFound)
@@ -216,33 +261,29 @@ func (h *Handlers) Token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request) {
-	clientID := r.FormValue("client_id")
-	clientSecret := r.FormValue("client_secret")
-	code := r.FormValue("code")
-	redirectURI := r.FormValue("redirect_uri")
-	codeVerifier := r.FormValue("code_verifier")
+	req := parseTokenRequest(r)
 
 	// Validate client credentials
-	client, err := h.DB.GetClient(clientID)
+	client, err := h.DB.GetClient(req.clientID)
 	if err != nil {
 		h.Logger.Error("token: db error", "error", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
 		return
 	}
 	if client == nil {
-		bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(clientSecret))
-		h.Logger.Warn("token: unknown client_id", "client_id", clientID)
+		bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(req.clientSecret))
+		h.Logger.Warn("token: unknown client_id", "client_id", req.clientID)
 		tokenError(w, http.StatusUnauthorized, "invalid_client", "Invalid client credentials")
 		return
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(client.ClientSecretHash), []byte(clientSecret)); err != nil {
-		h.Logger.Warn("token: invalid client_secret", "client_id", clientID)
+	if err := bcrypt.CompareHashAndPassword([]byte(client.ClientSecretHash), []byte(req.clientSecret)); err != nil {
+		h.Logger.Warn("token: invalid client_secret", "client_id", req.clientID)
 		tokenError(w, http.StatusUnauthorized, "invalid_client", "Invalid client credentials")
 		return
 	}
 
 	// Look up auth code
-	ac, err := h.DB.GetAuthCode(code)
+	ac, err := h.DB.GetAuthCode(req.code)
 	if err != nil {
 		h.Logger.Error("token: db error looking up code", "error", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
@@ -254,11 +295,11 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 	}
 	if ac.UsedAt != nil {
 		// RFC 6749 §10.5: if a code is used more than once, revoke all tokens issued from it
-		h.Logger.Warn("token: auth code replay detected — revoking all tokens from this code", "client_id", clientID)
-		if n, err := h.DB.RevokeTokensByAuthCode(code); err != nil {
+		h.Logger.Warn("token: auth code replay detected — revoking all tokens from this code", "client_id", req.clientID)
+		if n, err := h.DB.RevokeTokensByAuthCode(req.code); err != nil {
 			h.Logger.Error("token: failed to revoke tokens on code replay", "error", err)
 		} else if n > 0 {
-			h.Logger.Warn("token: revoked tokens due to code replay", "client_id", clientID, "count", n)
+			h.Logger.Warn("token: revoked tokens due to code replay", "client_id", req.clientID, "count", n)
 		}
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "Authorization code already used")
 		return
@@ -267,18 +308,18 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "Authorization code expired")
 		return
 	}
-	if ac.ClientID != clientID {
+	if ac.ClientID != req.clientID {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "Client ID mismatch")
 		return
 	}
-	if ac.RedirectURI != redirectURI {
+	if ac.RedirectURI != req.redirectURI {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "Redirect URI mismatch")
 		return
 	}
 
 	// Verify PKCE
-	if !ValidatePKCE(codeVerifier, ac.CodeChallenge) {
-		h.Logger.Warn("token: PKCE verification failed", "client_id", clientID)
+	if !ValidatePKCE(req.codeVerifier, ac.CodeChallenge) {
+		h.Logger.Warn("token: PKCE verification failed", "client_id", req.clientID)
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 		return
 	}
@@ -287,18 +328,18 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 	// we defer locking to this point so that only callers with the valid client_secret
 	// can lock the URI, preventing unauthenticated redirect URI hijacking at /authorize).
 	if client.RedirectURI == "" {
-		locked, err := h.DB.LockRedirectURI(clientID, redirectURI)
+		locked, err := h.DB.LockRedirectURI(req.clientID, req.redirectURI)
 		if err != nil {
 			h.Logger.Error("token: locking redirect_uri", "error", err)
 			tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
 			return
 		}
 		if locked {
-			h.Logger.Info("token: locked redirect_uri on first exchange", "client_id", clientID, "redirect_uri", redirectURI)
+			h.Logger.Info("token: locked redirect_uri on first exchange", "client_id", req.clientID, "redirect_uri", req.redirectURI)
 		} else {
 			// Race: another request locked it first — re-fetch and validate
-			client, _ = h.DB.GetClient(clientID)
-			if client == nil || redirectURI != client.RedirectURI {
+			client, _ = h.DB.GetClient(req.clientID)
+			if client == nil || req.redirectURI != client.RedirectURI {
 				tokenError(w, http.StatusBadRequest, "invalid_grant", "Redirect URI mismatch")
 				return
 			}
@@ -306,14 +347,14 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 	}
 
 	// Mark code as used
-	if err := h.DB.MarkCodeUsed(code); err != nil {
+	if err := h.DB.MarkCodeUsed(req.code); err != nil {
 		h.Logger.Error("token: marking code used", "error", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
 		return
 	}
 
 	// Issue tokens
-	h.issueTokensFromAuthCode(w, clientID, ac.Scope, code)
+	h.issueTokens(w, req.clientID, ac.Scope, req.code)
 }
 
 func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
@@ -372,15 +413,7 @@ func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Issue new tokens (no auth code linkage for refresh-based issuance)
-	h.issueTokensFromRefresh(w, clientID, rt.Scope)
-}
-
-func (h *Handlers) issueTokensFromAuthCode(w http.ResponseWriter, clientID, scope, authCode string) {
-	h.issueTokens(w, clientID, scope, authCode)
-}
-
-func (h *Handlers) issueTokensFromRefresh(w http.ResponseWriter, clientID, scope string) {
-	h.issueTokens(w, clientID, scope, "")
+	h.issueTokens(w, clientID, rt.Scope, "")
 }
 
 func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope, authCode string) {
