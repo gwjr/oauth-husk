@@ -20,6 +20,7 @@
 			uri /auth/verify
 			header_up X-Forwarded-Host {host}
 			header_up X-Forwarded-Proto {scheme}
+			copy_headers X-Auth-Client X-Auth-Scope
 		}
 		reverse_proxy localhost:8105
 	}

@@ -309,7 +309,7 @@ func TestFullTokenExchange(t *testing.T) {
 		t.Errorf("expected Bearer, got %v", tokenResp["token_type"])
 	}
 
-	// Step 3: Verify token
+	// Step 3: Verify token — check scope and client headers are set
 	accessToken := tokenResp["access_token"].(string)
 	req, _ := http.NewRequest("GET", env.Server.URL+"/auth/verify", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
@@ -320,6 +320,12 @@ func TestFullTokenExchange(t *testing.T) {
 	resp3.Body.Close()
 	if resp3.StatusCode != 200 {
 		t.Errorf("verify expected 200, got %d", resp3.StatusCode)
+	}
+	if got := resp3.Header.Get("X-Auth-Client"); got != "client1" {
+		t.Errorf("expected X-Auth-Client=client1, got %q", got)
+	}
+	if got := resp3.Header.Get("X-Auth-Scope"); got != "mcp:tools" {
+		t.Errorf("expected X-Auth-Scope=mcp:tools, got %q", got)
 	}
 }
 

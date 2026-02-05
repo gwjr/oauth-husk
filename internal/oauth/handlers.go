@@ -449,6 +449,8 @@ func (h *Handlers) VerifyToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.Logger.Debug("verify: token valid", "token_id", claims.JTI, "client_id", claims.Sub)
+	w.Header().Set("X-Auth-Client", claims.Sub)
+	w.Header().Set("X-Auth-Scope", claims.Scope)
 	w.WriteHeader(http.StatusOK)
 }
 
