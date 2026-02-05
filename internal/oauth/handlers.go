@@ -1,8 +1,6 @@
 package oauth
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -28,12 +26,16 @@ var dummyBcryptHash = func() []byte {
 	return hash
 }()
 
+var supportedScopes = []string{"mcp:tools", "mcp:resources", "mcp:prompts"}
+
 // validScopes is the set of scopes this server advertises and accepts.
-var validScopes = map[string]bool{
-	"mcp:tools":     true,
-	"mcp:resources": true,
-	"mcp:prompts":   true,
-}
+var validScopes = func() map[string]bool {
+	m := make(map[string]bool, len(supportedScopes))
+	for _, s := range supportedScopes {
+		m[s] = true
+	}
+	return m
+}()
 
 // Handlers holds dependencies for all OAuth HTTP handlers.
 type Handlers struct {
@@ -76,9 +78,9 @@ func (h *Handlers) AuthorizationServerMetadata(w http.ResponseWriter, r *http.Re
 		"token_endpoint":                        base + "/token",
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
-		"code_challenge_methods_supported":       []string{"S256"},
+		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_post"},
-		"scopes_supported":                      []string{"mcp:tools", "mcp:resources", "mcp:prompts"},
+		"scopes_supported":                      supportedScopes,
 	})
 }
 
@@ -92,7 +94,6 @@ func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
 	codeChallenge := q.Get("code_challenge")
 	codeChallengeMethod := q.Get("code_challenge_method")
 	scope := q.Get("scope")
-	resource := q.Get("resource")
 
 	// Validate client_id
 	client, err := h.DB.GetClient(clientID)
@@ -177,7 +178,7 @@ func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.DB.StoreAuthCode(code, clientID, redirectURI, codeChallenge, scope, resource, authCodeTTL); err != nil {
+	if err := h.DB.StoreAuthCode(code, clientID, redirectURI, codeChallenge, scope, authCodeTTL); err != nil {
 		h.Logger.Error("authorize: storing code", "error", err)
 		redirectError("server_error", "Failed to store authorization code")
 		return
@@ -312,7 +313,7 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 	}
 
 	// Issue tokens
-	h.issueTokens(w, clientID, ac.Scope, code)
+	h.issueTokensFromAuthCode(w, clientID, ac.Scope, code)
 }
 
 func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
@@ -371,7 +372,15 @@ func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Issue new tokens (no auth code linkage for refresh-based issuance)
-	h.issueTokens(w, clientID, rt.Scope, "")
+	h.issueTokensFromRefresh(w, clientID, rt.Scope)
+}
+
+func (h *Handlers) issueTokensFromAuthCode(w http.ResponseWriter, clientID, scope, authCode string) {
+	h.issueTokens(w, clientID, scope, authCode)
+}
+
+func (h *Handlers) issueTokensFromRefresh(w http.ResponseWriter, clientID, scope string) {
+	h.issueTokens(w, clientID, scope, "")
 }
 
 func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope, authCode string) {
@@ -458,25 +467,6 @@ func (h *Handlers) writeUnauthorized(w http.ResponseWriter, r *http.Request) {
 	base := baseURL(r)
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`, base))
 	w.WriteHeader(http.StatusUnauthorized)
-}
-
-
-// GenerateSecret generates a 32-byte cryptographically random secret, base64url-encoded.
-func GenerateSecret() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-// HashSecret hashes a client secret with bcrypt.
-func HashSecret(secret string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcryptCost)
-	if err != nil {
-		return "", err
-	}
-	return string(hash), nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

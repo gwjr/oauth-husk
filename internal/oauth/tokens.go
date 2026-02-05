@@ -2,7 +2,6 @@ package oauth
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -101,21 +100,8 @@ func (ts *TokenService) ValidateAccessToken(token string) (*TokenClaims, error) 
 	return &claims, nil
 }
 
-// GenerateRefreshToken creates an opaque 32-byte random token, base64url-encoded.
-func GenerateRefreshToken() (string, error) {
-	return randomBase64(32)
-}
-
 func (ts *TokenService) sign(data []byte) []byte {
 	mac := hmac.New(sha256.New, ts.signingKey)
 	mac.Write(data)
 	return mac.Sum(nil)
-}
-
-func randomBase64(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }

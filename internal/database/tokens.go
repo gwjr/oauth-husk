@@ -1,9 +1,7 @@
 package database
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"time"
 )
@@ -25,14 +23,8 @@ type RefreshToken struct {
 	ExpiresAt     time.Time
 }
 
-// HashRefreshToken returns the SHA-256 hex digest of a raw refresh token.
-func HashRefreshToken(raw string) string {
-	h := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(h[:])
-}
-
 func (d *DB) StoreAccessToken(tokenID, clientID, scope, authCode string, expiresAt time.Time) error {
-	codeHash := hashCode(authCode) // empty string hashes to a fixed value; harmless
+	codeHash := HashToken(authCode) // empty string hashes to a fixed value; harmless
 	_, err := d.db.Exec(
 		"INSERT INTO access_tokens (token_id, client_id, scope, auth_code, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
 		tokenID, clientID, scope, codeHash, time.Now().Unix(), expiresAt.Unix(),
@@ -63,10 +55,10 @@ func (d *DB) RevokeAccessToken(tokenID string) error {
 
 // StoreRefreshToken stores a refresh token by its SHA-256 hash.
 func (d *DB) StoreRefreshToken(rawToken, clientID, accessTokenID, scope, authCode string, expiresAt time.Time) error {
-	codeHash := hashCode(authCode)
+	codeHash := HashToken(authCode)
 	_, err := d.db.Exec(
 		"INSERT INTO refresh_tokens (token_hash, client_id, access_token_id, scope, auth_code, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		HashRefreshToken(rawToken), clientID, accessTokenID, scope, codeHash, time.Now().Unix(), expiresAt.Unix(),
+		HashToken(rawToken), clientID, accessTokenID, scope, codeHash, time.Now().Unix(), expiresAt.Unix(),
 	)
 	return err
 }
@@ -75,7 +67,7 @@ func (d *DB) StoreRefreshToken(rawToken, clientID, accessTokenID, scope, authCod
 func (d *DB) GetRefreshToken(rawToken string) (*RefreshToken, error) {
 	row := d.db.QueryRow(
 		"SELECT token_hash, client_id, access_token_id, scope, created_at, expires_at FROM refresh_tokens WHERE token_hash = ?",
-		HashRefreshToken(rawToken),
+		HashToken(rawToken),
 	)
 
 	var t RefreshToken
@@ -96,7 +88,7 @@ func (d *DB) GetRefreshToken(rawToken string) (*RefreshToken, error) {
 
 // RevokeRefreshToken deletes the refresh token record.
 func (d *DB) RevokeRefreshToken(rawToken string) error {
-	_, err := d.db.Exec("DELETE FROM refresh_tokens WHERE token_hash = ?", HashRefreshToken(rawToken))
+	_, err := d.db.Exec("DELETE FROM refresh_tokens WHERE token_hash = ?", HashToken(rawToken))
 	return err
 }
 
@@ -105,7 +97,7 @@ func (d *DB) RevokeTokensByAuthCode(authCode string) (int64, error) {
 	if authCode == "" {
 		return 0, nil
 	}
-	codeHash := hashCode(authCode)
+	codeHash := HashToken(authCode)
 	tx, err := d.db.Begin()
 	if err != nil {
 		return 0, err
@@ -124,19 +116,4 @@ func (d *DB) RevokeTokensByAuthCode(authCode string) (int64, error) {
 	n1, _ := res1.RowsAffected()
 	n2, _ := res2.RowsAffected()
 	return n1 + n2, tx.Commit()
-}
-
-func (d *DB) DeleteExpiredTokens() (int64, error) {
-	now := time.Now().Unix()
-	res1, err := d.db.Exec("DELETE FROM access_tokens WHERE expires_at < ?", now)
-	if err != nil {
-		return 0, err
-	}
-	res2, err := d.db.Exec("DELETE FROM refresh_tokens WHERE expires_at < ?", now)
-	if err != nil {
-		return 0, err
-	}
-	n1, _ := res1.RowsAffected()
-	n2, _ := res2.RowsAffected()
-	return n1 + n2, nil
 }

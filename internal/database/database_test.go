@@ -130,7 +130,7 @@ func TestAuthCodeFlow(t *testing.T) {
 	db.CreateClient("client1", "hash", "https://example.com/cb", "")
 
 	// Store code
-	err := db.StoreAuthCode("code123", "client1", "https://example.com/cb", "challenge", "mcp:tools", "", 120*time.Second)
+	err := db.StoreAuthCode("code123", "client1", "https://example.com/cb", "challenge", "mcp:tools", 120*time.Second)
 	if err != nil {
 		t.Fatalf("StoreAuthCode: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestRefreshTokenCRUD(t *testing.T) {
 	if rt.TokenHash == "raw-refresh-token" {
 		t.Error("expected token to be stored as hash, not raw value")
 	}
-	expectedHash := HashRefreshToken("raw-refresh-token")
+	expectedHash := HashToken("raw-refresh-token")
 	if rt.TokenHash != expectedHash {
 		t.Errorf("expected hash %s, got %s", expectedHash, rt.TokenHash)
 	}
@@ -269,7 +269,7 @@ func TestCleanupExpired(t *testing.T) {
 	db.CreateClient("client1", "hash", "https://example.com/cb", "")
 
 	// Store expired code
-	db.StoreAuthCode("expired-code", "client1", "https://example.com/cb", "ch", "", "", -1*time.Second)
+	db.StoreAuthCode("expired-code", "client1", "https://example.com/cb", "ch", "", -1*time.Second)
 
 	// Store expired token
 	db.StoreAccessToken("expired-at", "client1", "", "", time.Now().Add(-1*time.Hour))
@@ -286,63 +286,6 @@ func TestCleanupExpired(t *testing.T) {
 	exists, _ := db.AccessTokenExists("expired-at")
 	if exists {
 		t.Error("expected expired token to be cleaned up")
-	}
-}
-
-func TestDeleteExpiredCodes(t *testing.T) {
-	db := testDB(t)
-	db.CreateClient("client1", "hash", "https://example.com/cb", "")
-
-	db.StoreAuthCode("expired-code", "client1", "https://example.com/cb", "ch", "", "", -1*time.Second)
-	db.StoreAuthCode("valid-code", "client1", "https://example.com/cb", "ch", "", "", 120*time.Second)
-
-	n, err := db.DeleteExpiredCodes()
-	if err != nil {
-		t.Fatalf("DeleteExpiredCodes: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("expected 1 expired code deleted, got %d", n)
-	}
-
-	if ac, _ := db.GetAuthCode("expired-code"); ac != nil {
-		t.Fatal("expected expired code to be deleted")
-	}
-	if ac, _ := db.GetAuthCode("valid-code"); ac == nil {
-		t.Fatal("expected valid code to remain")
-	}
-}
-
-func TestDeleteExpiredTokens(t *testing.T) {
-	db := testDB(t)
-	db.CreateClient("client1", "hash", "https://example.com/cb", "")
-
-	expired := time.Now().Add(-1 * time.Hour)
-	valid := time.Now().Add(1 * time.Hour)
-
-	db.StoreAccessToken("expired-at", "client1", "", "", expired)
-	db.StoreAccessToken("valid-at", "client1", "", "", valid)
-	db.StoreRefreshToken("expired-rt", "client1", "expired-at", "", "", expired)
-	db.StoreRefreshToken("valid-rt", "client1", "valid-at", "", "", valid)
-
-	n, err := db.DeleteExpiredTokens()
-	if err != nil {
-		t.Fatalf("DeleteExpiredTokens: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("expected 2 expired tokens deleted, got %d", n)
-	}
-
-	if exists, _ := db.AccessTokenExists("expired-at"); exists {
-		t.Fatal("expected expired access token to be deleted")
-	}
-	if exists, _ := db.AccessTokenExists("valid-at"); !exists {
-		t.Fatal("expected valid access token to remain")
-	}
-	if rt, _ := db.GetRefreshToken("expired-rt"); rt != nil {
-		t.Fatal("expected expired refresh token to be deleted")
-	}
-	if rt, _ := db.GetRefreshToken("valid-rt"); rt == nil {
-		t.Fatal("expected valid refresh token to remain")
 	}
 }
 

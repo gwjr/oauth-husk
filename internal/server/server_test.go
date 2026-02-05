@@ -24,11 +24,11 @@ func newHandler(t *testing.T, allowed []string) http.Handler {
 	t.Cleanup(func() { db.Close() })
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	srv, _, err := New("127.0.0.1:0", db, logger, allowed)
+	svc, err := New("127.0.0.1:0", db, logger, allowed)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return srv.Handler
+	return svc.HTTP.Handler
 }
 
 func TestParseAllowedCIDRs(t *testing.T) {

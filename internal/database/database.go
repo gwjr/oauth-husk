@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -71,7 +70,6 @@ func (d *DB) migrate() error {
 			code_challenge TEXT NOT NULL,
 			code_challenge_method TEXT NOT NULL DEFAULT 'S256',
 			scope TEXT,
-			resource TEXT,
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,
 			used_at INTEGER,
@@ -81,6 +79,7 @@ func (d *DB) migrate() error {
 			token_id TEXT PRIMARY KEY,
 			client_id TEXT NOT NULL,
 			scope TEXT,
+			auth_code TEXT DEFAULT '',
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,
 			FOREIGN KEY (client_id) REFERENCES clients(client_id)
@@ -90,6 +89,7 @@ func (d *DB) migrate() error {
 			client_id TEXT NOT NULL,
 			access_token_id TEXT,
 			scope TEXT,
+			auth_code TEXT DEFAULT '',
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,
 			FOREIGN KEY (client_id) REFERENCES clients(client_id)
@@ -99,19 +99,12 @@ func (d *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires ON refresh_tokens(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_access_tokens_client ON access_tokens(client_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON refresh_tokens(client_id)`,
-		// Migration: add auth_code column to link tokens back to their originating code
-		`ALTER TABLE access_tokens ADD COLUMN auth_code TEXT DEFAULT ''`,
-		`ALTER TABLE refresh_tokens ADD COLUMN auth_code TEXT DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_access_tokens_auth_code ON access_tokens(auth_code)`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_auth_code ON refresh_tokens(auth_code)`,
 	}
 
 	for _, m := range migrations {
 		if _, err := d.db.Exec(m); err != nil {
-			// Ignore "duplicate column" errors from ADD COLUMN migrations
-			if strings.Contains(err.Error(), "duplicate column") {
-				continue
-			}
 			return fmt.Errorf("executing migration: %w\nSQL: %s", err, m)
 		}
 	}
@@ -152,8 +145,8 @@ func (d *DB) CleanupExpired() error {
 	}
 	defer tx.Rollback()
 
-	// Delete expired and used auth codes
-	if _, err := tx.Exec("DELETE FROM auth_codes WHERE expires_at < ? OR used_at IS NOT NULL", now); err != nil {
+	// Delete expired auth codes
+	if _, err := tx.Exec("DELETE FROM auth_codes WHERE expires_at < ?", now); err != nil {
 		return err
 	}
 	// Delete expired access tokens

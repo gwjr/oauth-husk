@@ -17,7 +17,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/gwjr/oauth-husk/internal/config"
 	"github.com/gwjr/oauth-husk/internal/database"
 	"github.com/gwjr/oauth-husk/internal/oauth"
 	"github.com/gwjr/oauth-husk/internal/server"
@@ -75,12 +74,12 @@ func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	host := fs.String("host", "127.0.0.1", "listen host")
 	port := fs.Int("port", 8200, "listen port")
-	dbPath := fs.String("db", config.DefaultDBPath(), "SQLite database path")
+	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
 	allowFrom := fs.String("allow-from", "", "comma-separated CIDRs/IPs allowed to access (default loopback only)")
 	fs.Parse(args)
 
-	*dbPath = config.ExpandTilde(*dbPath)
-	addr := config.ListenAddr(*host, *port)
+	*dbPath = expandTilde(*dbPath)
+	addr := listenAddr(*host, *port)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -91,11 +90,11 @@ func cmdServe(args []string) {
 	}
 	defer db.Close()
 
-	var allowedCIDRs []string
+	allowedCIDRs := defaultAllowedCIDRs()
 	if *allowFrom != "" {
 		allowedCIDRs = strings.Split(*allowFrom, ",")
 	}
-	srv, limiter, err := server.New(addr, db, logger, allowedCIDRs)
+	svc, err := server.New(addr, db, logger, allowedCIDRs)
 	if err != nil {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
@@ -103,14 +102,14 @@ func cmdServe(args []string) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server.StartCleanup(ctx, db, limiter, logger)
+	server.StartCleanup(ctx, db, svc.Limiter, logger)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		logger.Info("server starting", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := svc.HTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "error", err)
 			os.Exit(1)
 		}
@@ -122,7 +121,7 @@ func cmdServe(args []string) {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := svc.HTTP.Shutdown(shutdownCtx); err != nil {
 		logger.Error("shutdown error", "error", err)
 	}
 	logger.Info("server stopped")
@@ -132,7 +131,7 @@ func cmdClientAdd(args []string) {
 	promptInstall()
 
 	fs := flag.NewFlagSet("client add", flag.ExitOnError)
-	dbPath := fs.String("db", config.DefaultDBPath(), "SQLite database path")
+	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
 	redirectURI := fs.String("redirect-uri", "", "redirect URI (locked on first auth if omitted)")
 	description := fs.String("description", "", "description")
 	fs.Parse(args)
@@ -143,7 +142,7 @@ func cmdClientAdd(args []string) {
 	}
 	clientID := fs.Arg(0)
 
-	db, err := database.Open(config.ExpandTilde(*dbPath))
+	db, err := database.Open(expandTilde(*dbPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
 		os.Exit(1)
@@ -177,10 +176,10 @@ func cmdClientList(args []string) {
 	promptInstall()
 
 	fs := flag.NewFlagSet("client list", flag.ExitOnError)
-	dbPath := fs.String("db", config.DefaultDBPath(), "SQLite database path")
+	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
 	fs.Parse(args)
 
-	db, err := database.Open(config.ExpandTilde(*dbPath))
+	db, err := database.Open(expandTilde(*dbPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
 		os.Exit(1)
@@ -214,7 +213,7 @@ func cmdClientRevoke(args []string) {
 	promptInstall()
 
 	fs := flag.NewFlagSet("client revoke", flag.ExitOnError)
-	dbPath := fs.String("db", config.DefaultDBPath(), "SQLite database path")
+	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -223,7 +222,7 @@ func cmdClientRevoke(args []string) {
 	}
 	clientID := fs.Arg(0)
 
-	db, err := database.Open(config.ExpandTilde(*dbPath))
+	db, err := database.Open(expandTilde(*dbPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
 		os.Exit(1)
@@ -285,7 +284,7 @@ func xmlEscape(s string) string {
 func cmdInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	port := fs.Int("port", 8200, "listen port")
-	dbPath := fs.String("db", config.DefaultDBPath(), "SQLite database path")
+	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
 	allowFrom := fs.String("allow-from", "", "comma-separated CIDRs/IPs allowed to access (default loopback only)")
 	fs.Parse(args)
 
@@ -386,4 +385,37 @@ func cmdUninstall() {
 	}
 
 	fmt.Printf("Uninstalled %s\n", launchdLabel)
+}
+
+func listenAddr(host string, port int) string {
+	return fmt.Sprintf("%s:%d", host, port)
+}
+
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".oauth-husk.db"
+	}
+	return filepath.Join(home, ".config", "oauth-husk", "oauth.db")
+}
+
+func expandTilde(path string) string {
+	if !strings.HasPrefix(path, "~") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
+func defaultAllowedCIDRs() []string {
+	return []string{"127.0.0.0/8", "::1/128"}
 }

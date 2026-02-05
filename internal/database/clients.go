@@ -58,10 +58,11 @@ func (d *DB) ListClients() ([]Client, error) {
 	for rows.Next() {
 		var c Client
 		var createdAt int64
-		var desc sql.NullString
-		if err := rows.Scan(&c.ClientID, &c.RedirectURI, &createdAt, &desc); err != nil {
+		var desc, redirectURI sql.NullString
+		if err := rows.Scan(&c.ClientID, &redirectURI, &createdAt, &desc); err != nil {
 			return nil, err
 		}
+		c.RedirectURI = redirectURI.String
 		c.CreatedAt = time.Unix(createdAt, 0)
 		c.Description = desc.String
 		clients = append(clients, c)

@@ -18,15 +18,20 @@ const (
 	oauthRateLimitPerMin = 60
 )
 
-func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs []string) (*http.Server, *RateLimiter, error) {
+type Service struct {
+	HTTP    *http.Server
+	Limiter *RateLimiter
+}
+
+func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs []string) (*Service, error) {
 	signingKey, err := db.SigningKey()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	tokenSvc, err := oauth.NewTokenService(signingKey)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	h := &oauth.Handlers{
@@ -52,7 +57,7 @@ func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs [
 
 	allowed, err := parseAllowedCIDRs(allowedCIDRs)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	limiter := newRateLimiter(oauthRateLimitPerMin, oauthRateLimitBurst)
 
@@ -78,7 +83,7 @@ func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs [
 		IdleTimeout:  120 * time.Second,
 	}
 
-	return srv, limiter, nil
+	return &Service{HTTP: srv, Limiter: limiter}, nil
 }
 
 func isAllowedRemote(remoteAddr string, allowed []*net.IPNet) bool {
@@ -103,9 +108,6 @@ func remoteIP(remoteAddr string) string {
 }
 
 func parseAllowedCIDRs(cidrs []string) ([]*net.IPNet, error) {
-	if len(cidrs) == 0 {
-		cidrs = []string{"127.0.0.0/8", "::1/128"}
-	}
 	var allowed []*net.IPNet
 	for _, raw := range cidrs {
 		raw = strings.TrimSpace(raw)
@@ -191,13 +193,6 @@ func (rl *RateLimiter) cleanup(maxAge time.Duration) {
 		}
 	}
 	rl.mu.Unlock()
-}
-
-func min(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // StartCleanup runs periodic expired token/code cleanup and rate limiter pruning.
