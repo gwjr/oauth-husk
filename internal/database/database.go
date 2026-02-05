@@ -74,19 +74,9 @@ func (d *DB) migrate() error {
 			used_at INTEGER,
 			FOREIGN KEY (client_id) REFERENCES clients(client_id)
 		)`,
-		`CREATE TABLE IF NOT EXISTS access_tokens (
-			token_id TEXT PRIMARY KEY,
-			client_id TEXT NOT NULL,
-			scope TEXT,
-			auth_code TEXT DEFAULT '',
-			created_at INTEGER NOT NULL,
-			expires_at INTEGER NOT NULL,
-			FOREIGN KEY (client_id) REFERENCES clients(client_id)
-		)`,
 		`CREATE TABLE IF NOT EXISTS refresh_tokens (
 			token_hash TEXT PRIMARY KEY,
 			client_id TEXT NOT NULL,
-			access_token_id TEXT,
 			scope TEXT,
 			auth_code TEXT DEFAULT '',
 			created_at INTEGER NOT NULL,
@@ -94,11 +84,8 @@ func (d *DB) migrate() error {
 			FOREIGN KEY (client_id) REFERENCES clients(client_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_auth_codes_expires ON auth_codes(expires_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_access_tokens_expires ON access_tokens(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires ON refresh_tokens(expires_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_access_tokens_client ON access_tokens(client_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON refresh_tokens(client_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_access_tokens_auth_code ON access_tokens(auth_code)`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_auth_code ON refresh_tokens(auth_code)`,
 	}
 
@@ -146,10 +133,6 @@ func (d *DB) CleanupExpired() error {
 
 	// Delete expired auth codes
 	if _, err := tx.Exec("DELETE FROM auth_codes WHERE expires_at < ?", now); err != nil {
-		return err
-	}
-	// Delete expired access tokens
-	if _, err := tx.Exec("DELETE FROM access_tokens WHERE expires_at < ?", now); err != nil {
 		return err
 	}
 	// Delete expired refresh tokens

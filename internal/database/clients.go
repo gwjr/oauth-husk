@@ -82,19 +82,13 @@ func (d *DB) RevokeClientTokens(clientID string) (int64, error) {
 	}
 	defer tx.Rollback()
 
-	res1, err := tx.Exec("DELETE FROM access_tokens WHERE client_id = ?", clientID)
-	if err != nil {
-		return 0, err
-	}
-	res2, err := tx.Exec("DELETE FROM refresh_tokens WHERE client_id = ?", clientID)
+	res, err := tx.Exec("DELETE FROM refresh_tokens WHERE client_id = ?", clientID)
 	if err != nil {
 		return 0, err
 	}
 
-	n1, _ := res1.RowsAffected()
-	n2, _ := res2.RowsAffected()
-
-	return n1 + n2, tx.Commit()
+	n, _ := res.RowsAffected()
+	return n, tx.Commit()
 }
 
 // LockRedirectURI sets the redirect_uri for a client that doesn't have one yet.

@@ -374,13 +374,6 @@ func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to revoke old token")
 		return
 	}
-	// Delete old access token if present
-	if rt.AccessTokenID != "" {
-		if err := h.DB.RevokeAccessToken(rt.AccessTokenID); err != nil {
-			h.Logger.Error("token: revoking old access token", "error", err)
-		}
-	}
-
 	// Issue new tokens (no auth code linkage for refresh-based issuance)
 	h.issueTokens(w, clientID, rt.Scope, "")
 }
@@ -400,15 +393,9 @@ func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope, authCode 
 		return
 	}
 
-	// Store tokens — fail if storage fails (tokens must be in DB for revocation)
-	expiresAt := time.Unix(claims.EXP, 0)
-	if err := h.DB.StoreAccessToken(claims.JTI, clientID, scope, authCode, expiresAt); err != nil {
-		h.Logger.Error("token: storing access token", "error", err)
-		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
-		return
-	}
+	// Store refresh token — access tokens are stateless and not stored.
 	rfExpiry := time.Now().Add(RefreshTokenTTL)
-	if err := h.DB.StoreRefreshToken(refreshToken, clientID, claims.JTI, scope, authCode, rfExpiry); err != nil {
+	if err := h.DB.StoreRefreshToken(refreshToken, clientID, scope, authCode, rfExpiry); err != nil {
 		h.Logger.Error("token: storing refresh token", "error", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return
@@ -442,19 +429,6 @@ func (h *Handlers) VerifyToken(w http.ResponseWriter, r *http.Request) {
 	claims, err := h.Tokens.ValidateAccessToken(token)
 	if err != nil {
 		h.Logger.Debug("verify: token validation failed", "error", err)
-		h.writeUnauthorized(w, r)
-		return
-	}
-
-	// Token must exist in DB (revoke = delete, so missing = revoked)
-	exists, err := h.DB.AccessTokenExists(claims.JTI)
-	if err != nil {
-		h.Logger.Error("verify: db error", "error", err)
-		h.writeUnauthorized(w, r)
-		return
-	}
-	if !exists {
-		h.Logger.Info("verify: token not in database (revoked or never stored)", "token_id", claims.JTI)
 		h.writeUnauthorized(w, r)
 		return
 	}

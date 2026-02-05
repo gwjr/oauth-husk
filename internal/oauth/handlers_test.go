@@ -368,6 +368,7 @@ func TestToken_DoubleUseCode_RevokesTokens(t *testing.T) {
 		t.Fatalf("first exchange expected 200, got %d", resp2.StatusCode)
 	}
 	accessToken := tokenResp["access_token"].(string)
+	refreshToken := tokenResp["refresh_token"].(string)
 
 	// Verify the token works before replay
 	req, _ := http.NewRequest("GET", env.Server.URL+"/auth/verify", nil)
@@ -385,13 +386,17 @@ func TestToken_DoubleUseCode_RevokesTokens(t *testing.T) {
 		t.Error("second exchange should fail")
 	}
 
-	// RFC 6749 §10.5: tokens from the first exchange should now be revoked
-	req2, _ := http.NewRequest("GET", env.Server.URL+"/auth/verify", nil)
-	req2.Header.Set("Authorization", "Bearer "+accessToken)
-	verifyResp2, _ := http.DefaultClient.Do(req2)
-	verifyResp2.Body.Close()
-	if verifyResp2.StatusCode == 200 {
-		t.Error("token from replayed code should be revoked (RFC 6749 §10.5)")
+	// RFC 6749 §10.5: refresh token from the first exchange should now be revoked
+	refreshForm := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"client1"},
+		"client_secret": {"secret1"},
+	}
+	resp4, _ := http.PostForm(env.Server.URL+"/token", refreshForm)
+	resp4.Body.Close()
+	if resp4.StatusCode == 200 {
+		t.Error("refresh token from replayed code should be revoked (RFC 6749 §10.5)")
 	}
 }
 

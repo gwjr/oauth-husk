@@ -8,6 +8,8 @@ Claude.ai requires OAuth to connect to remote MCP servers. If you're self-hostin
 
 What it deliberately leaves out is any concept of multiple users — there's no login page, no user database, no consent screen. You register a client with a shared secret, and any MCP client with those credentials can get a token. This is appropriate if (but probably only if!) you're the only user and the MCP server is yours.
 
+Security goal (practical): treat oauth-husk as roughly equivalent in risk to pre-shared bearer tokens/API keys, while providing the OAuth flow required by MCP clients.
+
 ## How it works
 
 ```
@@ -85,7 +87,7 @@ If you omit `--redirect-uri`, the URI from the first successful authorization is
 - **No config file.** Flags for the two things that vary (port and DB path). The base URL is derived from Caddy's forwarded headers.
 - **No CGO.** Uses `modernc.org/sqlite` for a pure-Go build. Single static binary.
 - **Signing key in the database.** Auto-generated on first run, stored in a `settings` table. No secrets on the command line or in files.
-- **Tokens are signed, not opaque.** HMAC-SHA256 over a JSON payload means `/auth/verify` can validate most requests without hitting the database. Revocation checks are the exception.
+- **Access tokens are signed and stateless.** `/auth/verify` validates signature + expiry only. Refresh tokens are stored hashed for rotation and revocation.
 - **bcrypt for client secrets.** Cost 12. Timing-safe comparison even for unknown client IDs.
 
 ## Running tests
