@@ -51,6 +51,7 @@ func setup(t *testing.T) *testEnv {
 		DB:     db,
 		Tokens: tokenSvc,
 		Logger: logger,
+		Config: oauth.Config{AllowInsecureHTTP: true},
 	}
 
 	mux := http.NewServeMux()

@@ -106,17 +106,21 @@ Commands:
 }
 
 type serveConfig struct {
-	host        string
-	port        int
-	dbPath      string
-	allowFrom   []string
-	cleanupFreq time.Duration
+	host              string
+	port              int
+	dbPath            string
+	allowFrom         []string
+	cleanupFreq       time.Duration
+	allowInsecureHTTP bool
+	allowPublicCIDRs  bool
 }
 
 type installConfig struct {
-	port      int
-	dbPath    string
-	allowFrom []string
+	port              int
+	dbPath            string
+	allowFrom         []string
+	allowInsecureHTTP bool
+	allowPublicCIDRs  bool
 }
 
 func (c *CLI) parseServeConfig(args []string) (serveConfig, error) {
@@ -126,19 +130,26 @@ func (c *CLI) parseServeConfig(args []string) (serveConfig, error) {
 	port := fs.Int("port", 8200, "listen port")
 	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
 	allowFrom := fs.String("allow-from", "", "comma-separated CIDRs/IPs allowed to access (default loopback only)")
+	allowInsecureHTTP := fs.Bool("allow-insecure-http", false, "allow HTTP (no TLS) for local testing")
+	allowPublicCIDRs := fs.Bool("allow-public-cidrs", false, "allow 0.0.0.0/0 or ::/0 in --allow-from")
 	if err := fs.Parse(args); err != nil {
 		return serveConfig{}, err
 	}
 
 	cfg := serveConfig{
-		host:        *host,
-		port:        *port,
-		dbPath:      expandTilde(*dbPath),
-		allowFrom:   defaultAllowedCIDRs(),
-		cleanupFreq: time.Hour,
+		host:              *host,
+		port:              *port,
+		dbPath:            expandTilde(*dbPath),
+		allowFrom:         defaultAllowedCIDRs(),
+		cleanupFreq:       time.Hour,
+		allowInsecureHTTP: *allowInsecureHTTP,
+		allowPublicCIDRs:  *allowPublicCIDRs,
 	}
 	if *allowFrom != "" {
 		cfg.allowFrom = strings.Split(*allowFrom, ",")
+	}
+	if err := validateAllowFrom(cfg.allowFrom, cfg.allowPublicCIDRs); err != nil {
+		return serveConfig{}, err
 	}
 	return cfg, nil
 }
@@ -154,11 +165,16 @@ func (c *CLI) cmdServe(args []string) error {
 
 	db, err := database.Open(cfg.dbPath)
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return fmt.Errorf("failed to open database at %s: %w", cfg.dbPath, err)
 	}
 	defer db.Close()
 
-	svc, err := server.New(addr, db, logger, cfg.allowFrom)
+	svc, err := server.New(server.Config{
+		ListenAddr:        addr,
+		AllowedCIDRs:      cfg.allowFrom,
+		AllowInsecureHTTP: cfg.allowInsecureHTTP,
+		Logger:            logger,
+	}, db)
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
 	}
@@ -196,17 +212,24 @@ func (c *CLI) parseInstallConfig(args []string) (installConfig, error) {
 	port := fs.Int("port", 8200, "listen port")
 	dbPath := fs.String("db", defaultDBPath(), "SQLite database path")
 	allowFrom := fs.String("allow-from", "", "comma-separated CIDRs/IPs allowed to access (default loopback only)")
+	allowInsecureHTTP := fs.Bool("allow-insecure-http", false, "allow HTTP (no TLS) for local testing")
+	allowPublicCIDRs := fs.Bool("allow-public-cidrs", false, "allow 0.0.0.0/0 or ::/0 in --allow-from")
 	if err := fs.Parse(args); err != nil {
 		return installConfig{}, err
 	}
 
 	cfg := installConfig{
-		port:      *port,
-		dbPath:    expandTilde(*dbPath),
-		allowFrom: defaultAllowedCIDRs(),
+		port:              *port,
+		dbPath:            expandTilde(*dbPath),
+		allowFrom:         defaultAllowedCIDRs(),
+		allowInsecureHTTP: *allowInsecureHTTP,
+		allowPublicCIDRs:  *allowPublicCIDRs,
 	}
 	if *allowFrom != "" {
 		cfg.allowFrom = strings.Split(*allowFrom, ",")
+	}
+	if err := validateAllowFrom(cfg.allowFrom, cfg.allowPublicCIDRs); err != nil {
+		return installConfig{}, err
 	}
 	return cfg, nil
 }
@@ -414,6 +437,10 @@ func (c *CLI) cmdInstall(args []string) error {
 		<string>%s</string>
 		<string>--allow-from</string>
 		<string>%s</string>
+		<string>--allow-insecure-http</string>
+		<string>%t</string>
+		<string>--allow-public-cidrs</string>
+		<string>%t</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -426,6 +453,7 @@ func (c *CLI) cmdInstall(args []string) error {
 </dict>
 </plist>
 `, launchdLabel, xmlEscape(exe), cfg.port, xmlEscape(cfg.dbPath), xmlEscape(strings.Join(cfg.allowFrom, ",")),
+		cfg.allowInsecureHTTP, cfg.allowPublicCIDRs,
 		xmlEscape(filepath.Join(logDir, "oauth-husk.out")),
 		xmlEscape(filepath.Join(logDir, "oauth-husk.err")))
 
@@ -504,4 +532,17 @@ func expandTilde(path string) string {
 
 func defaultAllowedCIDRs() []string {
 	return []string{"127.0.0.0/8", "::1/128"}
+}
+
+func validateAllowFrom(cidrs []string, allowPublic bool) error {
+	if allowPublic {
+		return nil
+	}
+	for _, raw := range cidrs {
+		clean := strings.TrimSpace(raw)
+		if clean == "0.0.0.0/0" || clean == "::/0" {
+			return fmt.Errorf("refusing to allow public CIDR %q; if you really want this, pass --allow-public-cidrs", clean)
+		}
+	}
+	return nil
 }

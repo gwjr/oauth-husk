@@ -23,7 +23,14 @@ type Service struct {
 	Limiter *RateLimiter
 }
 
-func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs []string) (*Service, error) {
+type Config struct {
+	ListenAddr        string
+	AllowedCIDRs      []string
+	AllowInsecureHTTP bool
+	Logger            *slog.Logger
+}
+
+func New(cfg Config, db *database.DB) (*Service, error) {
 	signingKey, err := db.SigningKey()
 	if err != nil {
 		return nil, err
@@ -37,7 +44,8 @@ func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs [
 	h := &oauth.Handlers{
 		DB:     db,
 		Tokens: tokenSvc,
-		Logger: logger,
+		Logger: cfg.Logger,
+		Config: oauth.Config{AllowInsecureHTTP: cfg.AllowInsecureHTTP},
 	}
 
 	mux := http.NewServeMux()
@@ -55,7 +63,7 @@ func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs [
 	// Forward auth endpoint for Caddy
 	mux.HandleFunc("GET /auth/verify", h.VerifyToken)
 
-	allowed, err := parseAllowedCIDRs(allowedCIDRs)
+	allowed, err := parseAllowedCIDRs(cfg.AllowedCIDRs)
 	if err != nil {
 		return nil, err
 	}
@@ -63,12 +71,12 @@ func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs [
 
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isAllowedRemote(r.RemoteAddr, allowed) {
-			logger.Warn("request blocked: remote not allowed", "remote", r.RemoteAddr, "path", r.URL.Path)
+			cfg.Logger.Warn("request blocked: remote not allowed", "remote", r.RemoteAddr, "path", r.URL.Path)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 		if isRateLimitedPath(r.URL.Path) && !limiter.Allow(remoteIP(r.RemoteAddr)) {
-			logger.Warn("request rate-limited", "remote", r.RemoteAddr, "path", r.URL.Path)
+			cfg.Logger.Warn("request rate-limited", "remote", r.RemoteAddr, "path", r.URL.Path)
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
@@ -76,7 +84,7 @@ func New(listenAddr string, db *database.DB, logger *slog.Logger, allowedCIDRs [
 	})
 
 	srv := &http.Server{
-		Addr:         listenAddr,
+		Addr:         cfg.ListenAddr,
 		Handler:      protected,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,

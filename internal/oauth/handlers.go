@@ -31,6 +31,7 @@ type Handlers struct {
 	DB     *database.DB
 	Tokens *TokenService
 	Logger *slog.Logger
+	Config Config
 }
 
 type authorizeRequest struct {
@@ -41,6 +42,10 @@ type authorizeRequest struct {
 	codeChallenge       string
 	codeChallengeMethod string
 	scope               string
+}
+
+type Config struct {
+	AllowInsecureHTTP bool
 }
 
 type tokenRequest struct {
@@ -102,6 +107,10 @@ func baseURL(r *http.Request) string {
 // ProtectedResourceMetadata handles GET /.well-known/oauth-protected-resource
 func (h *Handlers) ProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Info("discovery: protected resource metadata", "remote", r.RemoteAddr)
+	if !h.isSecureRequest(r) {
+		http.Error(w, "Insecure HTTP is not allowed. Use HTTPS or set --allow-insecure-http for local testing.", http.StatusBadRequest)
+		return
+	}
 	base := baseURL(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"resource":              base,
@@ -112,6 +121,10 @@ func (h *Handlers) ProtectedResourceMetadata(w http.ResponseWriter, r *http.Requ
 // AuthorizationServerMetadata handles GET /.well-known/oauth-authorization-server
 func (h *Handlers) AuthorizationServerMetadata(w http.ResponseWriter, r *http.Request) {
 	h.Logger.Info("discovery: authorization server metadata", "remote", r.RemoteAddr)
+	if !h.isSecureRequest(r) {
+		http.Error(w, "Insecure HTTP is not allowed. Use HTTPS or set --allow-insecure-http for local testing.", http.StatusBadRequest)
+		return
+	}
 	base := baseURL(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                                base,
@@ -144,6 +157,7 @@ func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
 	redirectFull, err := validateRedirectURI(req.redirectURI)
 	if err != nil {
 		h.Logger.Warn("authorize: invalid redirect_uri", "client_id", req.clientID, "redirect_uri", req.redirectURI)
+		h.Logger.Info("authorize: rejected without redirect (invalid redirect_uri)", "client_id", req.clientID)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -437,6 +451,16 @@ func (h *Handlers) VerifyToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Auth-Client", claims.Sub)
 	w.Header().Set("X-Auth-Scope", claims.Scope)
 	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handlers) isSecureRequest(r *http.Request) bool {
+	if h.Config.AllowInsecureHTTP {
+		return true
+	}
+	if r.Header.Get("X-Forwarded-Proto") == "https" {
+		return true
+	}
+	return r.TLS != nil
 }
 
 func (h *Handlers) writeUnauthorized(w http.ResponseWriter, r *http.Request) {

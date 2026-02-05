@@ -24,7 +24,11 @@ func newHandler(t *testing.T, allowed []string) http.Handler {
 	t.Cleanup(func() { db.Close() })
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	svc, err := New("127.0.0.1:0", db, logger, allowed)
+	svc, err := New(Config{
+		ListenAddr:   "127.0.0.1:0",
+		AllowedCIDRs: allowed,
+		Logger:       logger,
+	}, db)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
