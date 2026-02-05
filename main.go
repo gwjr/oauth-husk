@@ -95,7 +95,7 @@ func cmdServe(args []string) {
 	if *allowFrom != "" {
 		allowedCIDRs = strings.Split(*allowFrom, ",")
 	}
-	srv, err := server.New(addr, db, logger, allowedCIDRs)
+	srv, limiter, err := server.New(addr, db, logger, allowedCIDRs)
 	if err != nil {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
@@ -103,7 +103,7 @@ func cmdServe(args []string) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server.StartCleanup(ctx, db, logger)
+	server.StartCleanup(ctx, db, limiter, logger)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

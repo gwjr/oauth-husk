@@ -24,7 +24,7 @@ func newHandler(t *testing.T, allowed []string) http.Handler {
 	t.Cleanup(func() { db.Close() })
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	srv, err := New("127.0.0.1:0", db, logger, allowed)
+	srv, _, err := New("127.0.0.1:0", db, logger, allowed)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestStartCleanupStops(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx, cancel := context.WithCancel(context.Background())
-	StartCleanup(ctx, db, logger)
+	StartCleanup(ctx, db, nil, logger)
 	cancel()
 
 	time.Sleep(10 * time.Millisecond)

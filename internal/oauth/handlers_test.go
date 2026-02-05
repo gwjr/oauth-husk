@@ -323,7 +323,7 @@ func TestFullTokenExchange(t *testing.T) {
 	}
 }
 
-func TestToken_DoubleUseCode(t *testing.T) {
+func TestToken_DoubleUseCode_RevokesTokens(t *testing.T) {
 	env := setup(t)
 	seedClient(t, env, "client1", "secret1", "https://callback.example.com/cb")
 
@@ -355,16 +355,37 @@ func TestToken_DoubleUseCode(t *testing.T) {
 		"code_verifier": {verifier},
 	}
 	resp2, _ := http.PostForm(env.Server.URL+"/token", form)
+	var tokenResp map[string]any
+	json.NewDecoder(resp2.Body).Decode(&tokenResp)
 	resp2.Body.Close()
 	if resp2.StatusCode != 200 {
 		t.Fatalf("first exchange expected 200, got %d", resp2.StatusCode)
 	}
+	accessToken := tokenResp["access_token"].(string)
 
-	// Second exchange — should fail
+	// Verify the token works before replay
+	req, _ := http.NewRequest("GET", env.Server.URL+"/auth/verify", nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	verifyResp, _ := http.DefaultClient.Do(req)
+	verifyResp.Body.Close()
+	if verifyResp.StatusCode != 200 {
+		t.Fatalf("token should be valid before replay, got %d", verifyResp.StatusCode)
+	}
+
+	// Second exchange — should fail (code already used)
 	resp3, _ := http.PostForm(env.Server.URL+"/token", form)
 	resp3.Body.Close()
 	if resp3.StatusCode == 200 {
 		t.Error("second exchange should fail")
+	}
+
+	// RFC 6749 §10.5: tokens from the first exchange should now be revoked
+	req2, _ := http.NewRequest("GET", env.Server.URL+"/auth/verify", nil)
+	req2.Header.Set("Authorization", "Bearer "+accessToken)
+	verifyResp2, _ := http.DefaultClient.Do(req2)
+	verifyResp2.Body.Close()
+	if verifyResp2.StatusCode == 200 {
+		t.Error("token from replayed code should be revoked (RFC 6749 §10.5)")
 	}
 }
 
@@ -522,20 +543,20 @@ func TestVerifyToken_Invalid(t *testing.T) {
 	}
 }
 
-func TestAuthorize_RedirectURI_LockOnFirstUse(t *testing.T) {
+func TestAuthorize_RedirectURI_LockOnFirstTokenExchange(t *testing.T) {
 	env := setup(t)
-	// Create client with no redirect_uri — will lock on first auth
+	// Create client with no redirect_uri — will lock on first successful token exchange
 	seedClient(t, env, "client1", "secret1", "")
-
-	verifier := "lock-test-verifier"
-	h := sha256.Sum256([]byte(verifier))
-	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 
 	noRedirectClient := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
 
-	// First auth — should lock the redirect URI
+	// Step 1: authorize — client has no locked URI, so any HTTPS URI is accepted
+	verifier := "lock-test-verifier"
+	h := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(h[:])
+
 	u := fmt.Sprintf("%s/authorize?response_type=code&client_id=client1&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256",
 		env.Server.URL,
 		url.QueryEscape("https://callback.example.com/cb"),
@@ -549,8 +570,25 @@ func TestAuthorize_RedirectURI_LockOnFirstUse(t *testing.T) {
 	if resp.StatusCode != 302 {
 		t.Fatalf("expected 302, got %d", resp.StatusCode)
 	}
+	loc, _ := resp.Location()
+	code := loc.Query().Get("code")
 
-	// Second auth with same URI — should succeed
+	// Step 2: token exchange — this locks the redirect URI (requires valid secret)
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"https://callback.example.com/cb"},
+		"client_id":     {"client1"},
+		"client_secret": {"secret1"},
+		"code_verifier": {verifier},
+	}
+	resp2, _ := http.PostForm(env.Server.URL+"/token", form)
+	resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("token exchange expected 200, got %d", resp2.StatusCode)
+	}
+
+	// Step 3: authorize with same URI — should succeed (URI now locked to this)
 	verifier2 := "lock-test-verifier-2"
 	h2 := sha256.Sum256([]byte(verifier2))
 	challenge2 := base64.RawURLEncoding.EncodeToString(h2[:])
@@ -560,28 +598,28 @@ func TestAuthorize_RedirectURI_LockOnFirstUse(t *testing.T) {
 		url.QueryEscape("https://callback.example.com/cb"),
 		challenge2,
 	)
-	resp2, err := noRedirectClient.Get(u2)
+	resp3, err := noRedirectClient.Get(u2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp2.Body.Close()
-	if resp2.StatusCode != 302 {
-		t.Errorf("expected 302 for same URI, got %d", resp2.StatusCode)
+	resp3.Body.Close()
+	if resp3.StatusCode != 302 {
+		t.Errorf("expected 302 for same URI after lock, got %d", resp3.StatusCode)
 	}
 
-	// Third auth with different URI — should be rejected
+	// Step 4: authorize with different URI — should be rejected (URI is locked)
 	u3 := fmt.Sprintf("%s/authorize?response_type=code&client_id=client1&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256",
 		env.Server.URL,
 		url.QueryEscape("https://evil.example.com/cb"),
 		challenge2,
 	)
-	resp3, err := noRedirectClient.Get(u3)
+	resp4, err := noRedirectClient.Get(u3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp3.Body.Close()
-	if resp3.StatusCode != 400 {
-		t.Errorf("expected 400 for different URI after lock, got %d", resp3.StatusCode)
+	resp4.Body.Close()
+	if resp4.StatusCode != 400 {
+		t.Errorf("expected 400 for different URI after lock, got %d", resp4.StatusCode)
 	}
 }
 

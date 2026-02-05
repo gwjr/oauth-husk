@@ -21,9 +21,10 @@ const (
 )
 
 // dummyBcryptHash is a valid bcrypt hash used for timing-safe comparison
-// when the client_id is not found. Generated from a known dummy value.
+// when the client_id is not found. Must use the same cost as real hashes
+// to prevent timing-based client enumeration.
 var dummyBcryptHash = func() []byte {
-	hash, _ := bcrypt.GenerateFromPassword([]byte("oauth-husk-dummy-secret"), bcrypt.DefaultCost)
+	hash, _ := bcrypt.GenerateFromPassword([]byte("oauth-husk-dummy-secret"), bcryptCost)
 	return hash
 }()
 
@@ -122,26 +123,11 @@ func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	redirectFull := parsedRedirect.String()
 
-	// Validate redirect_uri: exact match if locked, or lock on first use
-	if client.RedirectURI == "" {
-		// First authorization — lock this redirect URI for the client
-		locked, err := h.DB.LockRedirectURI(clientID, redirectFull)
-		if err != nil {
-			h.Logger.Error("authorize: locking redirect_uri", "error", err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-		if locked {
-			h.Logger.Info("authorize: locked redirect_uri", "client_id", clientID, "redirect_uri", redirectFull)
-		} else {
-			// Race: another request locked it first — re-fetch and validate
-			client, _ = h.DB.GetClient(clientID)
-			if client == nil || redirectFull != client.RedirectURI {
-				http.Error(w, "Invalid redirect URI", http.StatusBadRequest)
-				return
-			}
-		}
-	} else if redirectFull != client.RedirectURI {
+	// Validate redirect_uri: exact match if locked; accept any valid HTTPS URI if unlocked.
+	// Deliberate design choice: redirect_uri is locked on first successful token exchange
+	// (not here), so that only a caller who presents the correct client_secret can lock it.
+	// See tokenAuthorizationCode for the lock-on-first-use logic.
+	if client.RedirectURI != "" && redirectFull != client.RedirectURI {
 		h.Logger.Warn("authorize: redirect_uri mismatch", "client_id", clientID, "got", redirectFull, "want", client.RedirectURI)
 		http.Error(w, "Invalid redirect URI", http.StatusBadRequest)
 		return
@@ -266,7 +252,13 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if ac.UsedAt != nil {
-		h.Logger.Warn("token: auth code already used", "client_id", clientID)
+		// RFC 6749 §10.5: if a code is used more than once, revoke all tokens issued from it
+		h.Logger.Warn("token: auth code replay detected — revoking all tokens from this code", "client_id", clientID)
+		if n, err := h.DB.RevokeTokensByAuthCode(code); err != nil {
+			h.Logger.Error("token: failed to revoke tokens on code replay", "error", err)
+		} else if n > 0 {
+			h.Logger.Warn("token: revoked tokens due to code replay", "client_id", clientID, "count", n)
+		}
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "Authorization code already used")
 		return
 	}
@@ -290,6 +282,28 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Lock redirect URI on first successful token exchange (deliberate design choice:
+	// we defer locking to this point so that only callers with the valid client_secret
+	// can lock the URI, preventing unauthenticated redirect URI hijacking at /authorize).
+	if client.RedirectURI == "" {
+		locked, err := h.DB.LockRedirectURI(clientID, redirectURI)
+		if err != nil {
+			h.Logger.Error("token: locking redirect_uri", "error", err)
+			tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
+			return
+		}
+		if locked {
+			h.Logger.Info("token: locked redirect_uri on first exchange", "client_id", clientID, "redirect_uri", redirectURI)
+		} else {
+			// Race: another request locked it first — re-fetch and validate
+			client, _ = h.DB.GetClient(clientID)
+			if client == nil || redirectURI != client.RedirectURI {
+				tokenError(w, http.StatusBadRequest, "invalid_grant", "Redirect URI mismatch")
+				return
+			}
+		}
+	}
+
 	// Mark code as used
 	if err := h.DB.MarkCodeUsed(code); err != nil {
 		h.Logger.Error("token: marking code used", "error", err)
@@ -298,7 +312,7 @@ func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request
 	}
 
 	// Issue tokens
-	h.issueTokens(w, clientID, ac.Scope)
+	h.issueTokens(w, clientID, ac.Scope, code)
 }
 
 func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
@@ -356,11 +370,11 @@ func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Issue new tokens
-	h.issueTokens(w, clientID, rt.Scope)
+	// Issue new tokens (no auth code linkage for refresh-based issuance)
+	h.issueTokens(w, clientID, rt.Scope, "")
 }
 
-func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope string) {
+func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope, authCode string) {
 	accessToken, claims, err := h.Tokens.GenerateAccessToken(clientID, scope, AccessTokenTTL)
 	if err != nil {
 		h.Logger.Error("token: generating access token", "error", err)
@@ -377,13 +391,13 @@ func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope string) {
 
 	// Store tokens — fail if storage fails (tokens must be in DB for revocation)
 	expiresAt := time.Unix(claims.EXP, 0)
-	if err := h.DB.StoreAccessToken(claims.JTI, clientID, scope, expiresAt); err != nil {
+	if err := h.DB.StoreAccessToken(claims.JTI, clientID, scope, authCode, expiresAt); err != nil {
 		h.Logger.Error("token: storing access token", "error", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return
 	}
 	rfExpiry := time.Now().Add(RefreshTokenTTL)
-	if err := h.DB.StoreRefreshToken(refreshToken, clientID, claims.JTI, scope, rfExpiry); err != nil {
+	if err := h.DB.StoreRefreshToken(refreshToken, clientID, claims.JTI, scope, authCode, rfExpiry); err != nil {
 		h.Logger.Error("token: storing refresh token", "error", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
 		return

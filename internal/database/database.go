@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -98,10 +99,19 @@ func (d *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires ON refresh_tokens(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_access_tokens_client ON access_tokens(client_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client ON refresh_tokens(client_id)`,
+		// Migration: add auth_code column to link tokens back to their originating code
+		`ALTER TABLE access_tokens ADD COLUMN auth_code TEXT DEFAULT ''`,
+		`ALTER TABLE refresh_tokens ADD COLUMN auth_code TEXT DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_access_tokens_auth_code ON access_tokens(auth_code)`,
+		`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_auth_code ON refresh_tokens(auth_code)`,
 	}
 
 	for _, m := range migrations {
 		if _, err := d.db.Exec(m); err != nil {
+			// Ignore "duplicate column" errors from ADD COLUMN migrations
+			if strings.Contains(err.Error(), "duplicate column") {
+				continue
+			}
 			return fmt.Errorf("executing migration: %w\nSQL: %s", err, m)
 		}
 	}
