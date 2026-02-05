@@ -1,0 +1,16 @@
+:8443 {
+	tls /path/to/origin-cert.pem /path/to/origin-key.pem
+
+	@oauth path /.well-known/oauth-protected-resource /.well-known/oauth-authorization-server /authorize /token
+	handle @oauth {
+		reverse_proxy localhost:8200
+	}
+
+	@mcp path /mcp /sse /messages
+	handle @mcp {
+		forward_auth localhost:8200 {
+			uri /auth/verify
+		}
+		reverse_proxy localhost:8105
+	}
+}

@@ -1,0 +1,475 @@
+package oauth
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/gwjr/oauth-husk/internal/database"
+	"golang.org/x/crypto/bcrypt"
+)
+
+const (
+	authCodeTTL = 120 * time.Second
+	bcryptCost  = 12
+)
+
+// dummyBcryptHash is a valid bcrypt hash used for timing-safe comparison
+// when the client_id is not found. Generated from a known dummy value.
+var dummyBcryptHash = func() []byte {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("oauth-husk-dummy-secret"), bcrypt.DefaultCost)
+	return hash
+}()
+
+// validScopes is the set of scopes this server advertises and accepts.
+var validScopes = map[string]bool{
+	"mcp:tools":     true,
+	"mcp:resources": true,
+	"mcp:prompts":   true,
+}
+
+// Handlers holds dependencies for all OAuth HTTP handlers.
+type Handlers struct {
+	DB     *database.DB
+	Tokens *TokenService
+	Logger *slog.Logger
+}
+
+// baseURL derives the external base URL from the request headers.
+// Caddy sets X-Forwarded-Host and X-Forwarded-Proto.
+func baseURL(r *http.Request) string {
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		scheme = "https"
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return scheme + "://" + host
+}
+
+// ProtectedResourceMetadata handles GET /.well-known/oauth-protected-resource
+func (h *Handlers) ProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	h.Logger.Info("discovery: protected resource metadata", "remote", r.RemoteAddr)
+	base := baseURL(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"resource":              base,
+		"authorization_servers": []string{base},
+	})
+}
+
+// AuthorizationServerMetadata handles GET /.well-known/oauth-authorization-server
+func (h *Handlers) AuthorizationServerMetadata(w http.ResponseWriter, r *http.Request) {
+	h.Logger.Info("discovery: authorization server metadata", "remote", r.RemoteAddr)
+	base := baseURL(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issuer":                                base,
+		"authorization_endpoint":                base + "/authorize",
+		"token_endpoint":                        base + "/token",
+		"response_types_supported":              []string{"code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"code_challenge_methods_supported":       []string{"S256"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_post"},
+		"scopes_supported":                      []string{"mcp:tools", "mcp:resources", "mcp:prompts"},
+	})
+}
+
+// Authorize handles GET /authorize
+func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	clientID := q.Get("client_id")
+	redirectURI := q.Get("redirect_uri")
+	responseType := q.Get("response_type")
+	state := q.Get("state")
+	codeChallenge := q.Get("code_challenge")
+	codeChallengeMethod := q.Get("code_challenge_method")
+	scope := q.Get("scope")
+	resource := q.Get("resource")
+
+	// Validate client_id
+	client, err := h.DB.GetClient(clientID)
+	if err != nil {
+		h.Logger.Error("authorize: db error", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	if client == nil {
+		h.Logger.Warn("authorize: unknown client_id", "client_id", clientID)
+		http.Error(w, "Unknown client", http.StatusUnauthorized)
+		return
+	}
+
+	// Validate redirect_uri scheme — must be https
+	parsedRedirect, err := url.Parse(redirectURI)
+	if err != nil || parsedRedirect.Scheme != "https" {
+		h.Logger.Warn("authorize: non-https redirect_uri", "client_id", clientID, "redirect_uri", redirectURI)
+		http.Error(w, "Invalid redirect URI: must use https", http.StatusBadRequest)
+		return
+	}
+
+	// Strip query from redirect_uri for comparison/storage (base URI only)
+	parsedRedirect.RawQuery = ""
+	parsedRedirect.Fragment = ""
+	redirectBase := parsedRedirect.String()
+
+	// Validate redirect_uri: exact match if locked, or lock on first use
+	if client.RedirectURI == "" {
+		// First authorization — lock this redirect URI for the client
+		locked, err := h.DB.LockRedirectURI(clientID, redirectBase)
+		if err != nil {
+			h.Logger.Error("authorize: locking redirect_uri", "error", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if locked {
+			h.Logger.Info("authorize: locked redirect_uri", "client_id", clientID, "redirect_uri", redirectBase)
+		} else {
+			// Race: another request locked it first — re-fetch and validate
+			client, _ = h.DB.GetClient(clientID)
+			if client == nil || redirectBase != client.RedirectURI {
+				http.Error(w, "Invalid redirect URI", http.StatusBadRequest)
+				return
+			}
+		}
+	} else if redirectBase != client.RedirectURI {
+		h.Logger.Warn("authorize: redirect_uri mismatch", "client_id", clientID, "got", redirectBase, "want", client.RedirectURI)
+		http.Error(w, "Invalid redirect URI", http.StatusBadRequest)
+		return
+	}
+
+	// From here on, errors redirect back to redirect_uri with error params
+	redirectError := func(errCode, desc string) {
+		u, _ := url.Parse(redirectURI)
+		params := u.Query()
+		params.Set("error", errCode)
+		params.Set("error_description", desc)
+		if state != "" {
+			params.Set("state", state)
+		}
+		u.RawQuery = params.Encode()
+		http.Redirect(w, r, u.String(), http.StatusFound)
+	}
+
+	if responseType != "code" {
+		redirectError("unsupported_response_type", "Only 'code' response type is supported")
+		return
+	}
+	if codeChallengeMethod != "S256" {
+		redirectError("invalid_request", "Only S256 code_challenge_method is supported")
+		return
+	}
+	if codeChallenge == "" {
+		redirectError("invalid_request", "code_challenge is required")
+		return
+	}
+
+	// Validate scope
+	if scope != "" {
+		for _, s := range strings.Split(scope, " ") {
+			if !validScopes[s] {
+				redirectError("invalid_scope", fmt.Sprintf("Unknown scope: %s", s))
+				return
+			}
+		}
+	}
+
+	// Generate auth code
+	code, err := GenerateAuthCode()
+	if err != nil {
+		h.Logger.Error("authorize: generating code", "error", err)
+		redirectError("server_error", "Failed to generate authorization code")
+		return
+	}
+
+	if err := h.DB.StoreAuthCode(code, clientID, redirectURI, codeChallenge, scope, resource, authCodeTTL); err != nil {
+		h.Logger.Error("authorize: storing code", "error", err)
+		redirectError("server_error", "Failed to store authorization code")
+		return
+	}
+
+	h.Logger.Info("authorize: code issued", "client_id", clientID, "scope", scope)
+
+	// Redirect with code and state
+	u, _ := url.Parse(redirectURI)
+	params := u.Query()
+	params.Set("code", code)
+	if state != "" {
+		params.Set("state", state)
+	}
+	u.RawQuery = params.Encode()
+	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+// Token handles POST /token
+func (h *Handlers) Token(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		tokenError(w, http.StatusBadRequest, "invalid_request", "Failed to parse form")
+		return
+	}
+
+	grantType := r.FormValue("grant_type")
+	switch grantType {
+	case "authorization_code":
+		h.tokenAuthorizationCode(w, r)
+	case "refresh_token":
+		h.tokenRefreshToken(w, r)
+	default:
+		tokenError(w, http.StatusBadRequest, "unsupported_grant_type", "Unsupported grant type")
+	}
+}
+
+func (h *Handlers) tokenAuthorizationCode(w http.ResponseWriter, r *http.Request) {
+	clientID := r.FormValue("client_id")
+	clientSecret := r.FormValue("client_secret")
+	code := r.FormValue("code")
+	redirectURI := r.FormValue("redirect_uri")
+	codeVerifier := r.FormValue("code_verifier")
+
+	// Validate client credentials
+	client, err := h.DB.GetClient(clientID)
+	if err != nil {
+		h.Logger.Error("token: db error", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
+		return
+	}
+	if client == nil {
+		bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(clientSecret))
+		h.Logger.Warn("token: unknown client_id", "client_id", clientID)
+		tokenError(w, http.StatusUnauthorized, "invalid_client", "Invalid client credentials")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(client.ClientSecretHash), []byte(clientSecret)); err != nil {
+		h.Logger.Warn("token: invalid client_secret", "client_id", clientID)
+		tokenError(w, http.StatusUnauthorized, "invalid_client", "Invalid client credentials")
+		return
+	}
+
+	// Look up auth code
+	ac, err := h.DB.GetAuthCode(code)
+	if err != nil {
+		h.Logger.Error("token: db error looking up code", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
+		return
+	}
+	if ac == nil {
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "Invalid authorization code")
+		return
+	}
+	if ac.UsedAt != nil {
+		h.Logger.Warn("token: auth code already used", "client_id", clientID)
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "Authorization code already used")
+		return
+	}
+	if time.Now().After(ac.ExpiresAt) {
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "Authorization code expired")
+		return
+	}
+	if ac.ClientID != clientID {
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "Client ID mismatch")
+		return
+	}
+	if ac.RedirectURI != redirectURI {
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "Redirect URI mismatch")
+		return
+	}
+
+	// Verify PKCE
+	if !ValidatePKCE(codeVerifier, ac.CodeChallenge) {
+		h.Logger.Warn("token: PKCE verification failed", "client_id", clientID)
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+		return
+	}
+
+	// Mark code as used
+	if err := h.DB.MarkCodeUsed(code); err != nil {
+		h.Logger.Error("token: marking code used", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
+		return
+	}
+
+	// Issue tokens
+	h.issueTokens(w, clientID, ac.Scope)
+}
+
+func (h *Handlers) tokenRefreshToken(w http.ResponseWriter, r *http.Request) {
+	clientID := r.FormValue("client_id")
+	clientSecret := r.FormValue("client_secret")
+	refreshTokenStr := r.FormValue("refresh_token")
+
+	// Validate client credentials
+	client, err := h.DB.GetClient(clientID)
+	if err != nil {
+		h.Logger.Error("token: db error", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
+		return
+	}
+	if client == nil {
+		bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(clientSecret))
+		tokenError(w, http.StatusUnauthorized, "invalid_client", "Invalid client credentials")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(client.ClientSecretHash), []byte(clientSecret)); err != nil {
+		tokenError(w, http.StatusUnauthorized, "invalid_client", "Invalid client credentials")
+		return
+	}
+
+	// Look up refresh token
+	rt, err := h.DB.GetRefreshToken(refreshTokenStr)
+	if err != nil {
+		h.Logger.Error("token: db error looking up refresh token", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Internal error")
+		return
+	}
+	if rt == nil {
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "Invalid refresh token")
+		return
+	}
+	if time.Now().After(rt.ExpiresAt) {
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "Refresh token expired")
+		return
+	}
+	if rt.ClientID != clientID {
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "Client ID mismatch")
+		return
+	}
+
+	// Delete old refresh token (revoke = delete)
+	if err := h.DB.RevokeRefreshToken(refreshTokenStr); err != nil {
+		h.Logger.Error("token: revoking old refresh token", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to revoke old token")
+		return
+	}
+	// Delete old access token if present
+	if rt.AccessTokenID != "" {
+		if err := h.DB.RevokeAccessToken(rt.AccessTokenID); err != nil {
+			h.Logger.Error("token: revoking old access token", "error", err)
+		}
+	}
+
+	// Issue new tokens
+	h.issueTokens(w, clientID, rt.Scope)
+}
+
+func (h *Handlers) issueTokens(w http.ResponseWriter, clientID, scope string) {
+	accessToken, claims, err := h.Tokens.GenerateAccessToken(clientID, scope, AccessTokenTTL)
+	if err != nil {
+		h.Logger.Error("token: generating access token", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		return
+	}
+
+	refreshToken, err := GenerateRefreshToken()
+	if err != nil {
+		h.Logger.Error("token: generating refresh token", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to generate token")
+		return
+	}
+
+	// Store tokens — fail if storage fails (tokens must be in DB for revocation)
+	expiresAt := time.Unix(claims.EXP, 0)
+	if err := h.DB.StoreAccessToken(claims.JTI, clientID, scope, expiresAt); err != nil {
+		h.Logger.Error("token: storing access token", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+		return
+	}
+	rfExpiry := time.Now().Add(RefreshTokenTTL)
+	if err := h.DB.StoreRefreshToken(refreshToken, clientID, claims.JTI, scope, rfExpiry); err != nil {
+		h.Logger.Error("token: storing refresh token", "error", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "Failed to store token")
+		return
+	}
+
+	h.Logger.Info("token: issued", "client_id", clientID, "token_id", claims.JTI, "scope", scope)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":  accessToken,
+		"token_type":    "Bearer",
+		"expires_in":    int(AccessTokenTTL.Seconds()),
+		"refresh_token": refreshToken,
+	})
+}
+
+// VerifyToken handles GET /auth/verify for Caddy forward_auth.
+func (h *Handlers) VerifyToken(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		h.writeUnauthorized(w, r)
+		return
+	}
+
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		h.writeUnauthorized(w, r)
+		return
+	}
+	token := parts[1]
+
+	claims, err := h.Tokens.ValidateAccessToken(token)
+	if err != nil {
+		h.Logger.Debug("verify: token validation failed", "error", err)
+		h.writeUnauthorized(w, r)
+		return
+	}
+
+	// Token must exist in DB (revoke = delete, so missing = revoked)
+	exists, err := h.DB.AccessTokenExists(claims.JTI)
+	if err != nil {
+		h.Logger.Error("verify: db error", "error", err)
+		h.writeUnauthorized(w, r)
+		return
+	}
+	if !exists {
+		h.Logger.Info("verify: token not in database (revoked or never stored)", "token_id", claims.JTI)
+		h.writeUnauthorized(w, r)
+		return
+	}
+
+	h.Logger.Debug("verify: token valid", "token_id", claims.JTI, "client_id", claims.Sub)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handlers) writeUnauthorized(w http.ResponseWriter, r *http.Request) {
+	base := baseURL(r)
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`, base))
+	w.WriteHeader(http.StatusUnauthorized)
+}
+
+
+// GenerateSecret generates a 32-byte cryptographically random secret, base64url-encoded.
+func GenerateSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// HashSecret hashes a client secret with bcrypt.
+func HashSecret(secret string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcryptCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func tokenError(w http.ResponseWriter, status int, errCode, description string) {
+	writeJSON(w, status, map[string]string{
+		"error":             errCode,
+		"error_description": description,
+	})
+}

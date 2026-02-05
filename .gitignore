@@ -1,0 +1,4 @@
+oauth-husk
+*.db
+.DS_Store
+.claude/settings.local.json
