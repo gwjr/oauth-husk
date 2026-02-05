@@ -68,7 +68,6 @@ func (d *DB) migrate() error {
 			client_id TEXT NOT NULL,
 			redirect_uri TEXT NOT NULL,
 			code_challenge TEXT NOT NULL,
-			code_challenge_method TEXT NOT NULL DEFAULT 'S256',
 			scope TEXT,
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,

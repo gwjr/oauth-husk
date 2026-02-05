@@ -7,21 +7,20 @@ import (
 )
 
 type AuthCode struct {
-	ClientID            string
-	RedirectURI         string
-	CodeChallenge       string
-	CodeChallengeMethod string
-	Scope               string
-	CreatedAt           time.Time
-	ExpiresAt           time.Time
-	UsedAt              *time.Time
+	ClientID      string
+	RedirectURI   string
+	CodeChallenge string
+	Scope         string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+	UsedAt        *time.Time
 }
 
 func (d *DB) StoreAuthCode(code, clientID, redirectURI, codeChallenge, scope string, ttl time.Duration) error {
 	now := time.Now()
 	_, err := d.db.Exec(
-		`INSERT INTO auth_codes (code, client_id, redirect_uri, code_challenge, code_challenge_method, scope, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, 'S256', ?, ?, ?)`,
+		`INSERT INTO auth_codes (code, client_id, redirect_uri, code_challenge, scope, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		HashToken(code), clientID, redirectURI, codeChallenge, scope, now.Unix(), now.Add(ttl).Unix(),
 	)
 	return err
@@ -29,7 +28,7 @@ func (d *DB) StoreAuthCode(code, clientID, redirectURI, codeChallenge, scope str
 
 func (d *DB) GetAuthCode(code string) (*AuthCode, error) {
 	row := d.db.QueryRow(
-		`SELECT client_id, redirect_uri, code_challenge, code_challenge_method, scope, created_at, expires_at, used_at
+		`SELECT client_id, redirect_uri, code_challenge, scope, created_at, expires_at, used_at
 		 FROM auth_codes WHERE code = ?`,
 		HashToken(code),
 	)
@@ -38,7 +37,7 @@ func (d *DB) GetAuthCode(code string) (*AuthCode, error) {
 	var createdAt, expiresAt int64
 	var usedAt sql.NullInt64
 	var scope sql.NullString
-	if err := row.Scan(&ac.ClientID, &ac.RedirectURI, &ac.CodeChallenge, &ac.CodeChallengeMethod,
+	if err := row.Scan(&ac.ClientID, &ac.RedirectURI, &ac.CodeChallenge,
 		&scope, &createdAt, &expiresAt, &usedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil

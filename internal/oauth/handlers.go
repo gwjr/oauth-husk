@@ -26,17 +26,6 @@ var dummyBcryptHash = func() []byte {
 	return hash
 }()
 
-var supportedScopes = []string{"mcp:tools", "mcp:resources", "mcp:prompts"}
-
-// validScopes is the set of scopes this server advertises and accepts.
-var validScopes = func() map[string]bool {
-	m := make(map[string]bool, len(supportedScopes))
-	for _, s := range supportedScopes {
-		m[s] = true
-	}
-	return m
-}()
-
 // Handlers holds dependencies for all OAuth HTTP handlers.
 type Handlers struct {
 	DB     *database.DB
@@ -83,18 +72,6 @@ func parseTokenRequest(r *http.Request) tokenRequest {
 		redirectURI:  r.FormValue("redirect_uri"),
 		codeVerifier: r.FormValue("code_verifier"),
 	}
-}
-
-func validateScopes(scope string) (string, error) {
-	if scope == "" {
-		return scope, nil
-	}
-	for _, s := range strings.Split(scope, " ") {
-		if !validScopes[s] {
-			return scope, fmt.Errorf("Unknown scope: %s", s)
-		}
-	}
-	return scope, nil
 }
 
 func validateRedirectURI(raw string) (string, error) {
@@ -144,7 +121,6 @@ func (h *Handlers) AuthorizationServerMetadata(w http.ResponseWriter, r *http.Re
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_post"},
-		"scopes_supported":                      supportedScopes,
 	})
 }
 
@@ -208,13 +184,6 @@ func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate scope
-	scope, err := validateScopes(req.scope)
-	if err != nil {
-		redirectError("invalid_scope", err.Error())
-		return
-	}
-
 	// Generate auth code
 	code, err := GenerateAuthCode()
 	if err != nil {
@@ -223,13 +192,13 @@ func (h *Handlers) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.DB.StoreAuthCode(code, req.clientID, req.redirectURI, req.codeChallenge, scope, authCodeTTL); err != nil {
+	if err := h.DB.StoreAuthCode(code, req.clientID, req.redirectURI, req.codeChallenge, req.scope, authCodeTTL); err != nil {
 		h.Logger.Error("authorize: storing code", "error", err)
 		redirectError("server_error", "Failed to store authorization code")
 		return
 	}
 
-	h.Logger.Info("authorize: code issued", "client_id", req.clientID, "scope", scope)
+	h.Logger.Info("authorize: code issued", "client_id", req.clientID, "scope", req.scope)
 
 	// Redirect with code and state
 	u, _ := url.Parse(req.redirectURI)
