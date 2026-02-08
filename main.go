@@ -102,7 +102,7 @@ Commands:
   uninstall         Stop and remove the launchd service
   client add        Add a client (generates and prints secret once)
   client list       List clients
-  client revoke     Revoke all tokens for a client`)
+  client revoke     Delete a client and its tokens`)
 }
 
 type serveConfig struct {
@@ -344,12 +344,12 @@ func (c *CLI) cmdClientRevoke(args []string) error {
 	}
 	defer db.Close()
 
-	n, err := db.RevokeClientTokens(clientID)
+	n, err := db.RevokeClient(clientID)
 	if err != nil {
-		return fmt.Errorf("error revoking tokens: %w", err)
+		return fmt.Errorf("error revoking client: %w", err)
 	}
 
-	fmt.Fprintf(c.Out, "Revoked %d token(s) for client '%s'\n", n, clientID)
+	fmt.Fprintf(c.Out, "Revoked client '%s' (%d token(s) deleted)\n", clientID, n)
 	return nil
 }
 

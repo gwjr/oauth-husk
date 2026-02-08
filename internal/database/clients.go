@@ -70,13 +70,28 @@ func (d *DB) ListClients() ([]Client, error) {
 	return clients, rows.Err()
 }
 
-func (d *DB) RevokeClientTokens(clientID string) (int64, error) {
-	res, err := d.db.Exec("DELETE FROM refresh_tokens WHERE client_id = ?", clientID)
+func (d *DB) RevokeClient(clientID string) (int64, error) {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec("DELETE FROM refresh_tokens WHERE client_id = ?", clientID)
 	if err != nil {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
-	return n, nil
+
+	if _, err := tx.Exec("DELETE FROM auth_codes WHERE client_id = ?", clientID); err != nil {
+		return 0, err
+	}
+
+	if _, err := tx.Exec("DELETE FROM clients WHERE client_id = ?", clientID); err != nil {
+		return 0, err
+	}
+
+	return n, tx.Commit()
 }
 
 // LockRedirectURI sets the redirect_uri for a client that doesn't have one yet.

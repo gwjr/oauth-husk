@@ -155,7 +155,7 @@ func TestRefreshTokenCRUD(t *testing.T) {
 	}
 }
 
-func TestRevokeClientTokens(t *testing.T) {
+func TestRevokeClient(t *testing.T) {
 	db := testDB(t)
 	db.CreateClient("client1", "hash", "https://example.com/cb", "")
 
@@ -163,12 +163,21 @@ func TestRevokeClientTokens(t *testing.T) {
 	db.StoreRefreshToken("rt1", "client1", "", expires)
 	db.StoreRefreshToken("rt2", "client1", "", expires)
 
-	n, err := db.RevokeClientTokens("client1")
+	n, err := db.RevokeClient("client1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
-		t.Errorf("expected 2 revoked, got %d", n)
+		t.Errorf("expected 2 tokens revoked, got %d", n)
+	}
+
+	// Client should be gone
+	c, err := db.GetClient("client1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c != nil {
+		t.Error("expected client to be deleted")
 	}
 }
 
