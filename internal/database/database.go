@@ -27,6 +27,8 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
+	db.SetMaxOpenConns(1)
+
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("pinging database: %w", err)
@@ -47,6 +49,9 @@ func Open(path string) (*DB, error) {
 }
 
 func (d *DB) Close() error {
+	// Force WAL checkpoint before closing to ensure all data is visible
+	// to subsequent connections (modernc.org/sqlite WAL persistence issue).
+	d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return d.db.Close()
 }
 

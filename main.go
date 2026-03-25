@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -29,7 +30,12 @@ func main() {
 		Out: os.Stdout,
 		Err: os.Stderr,
 	}
-	os.Exit(cli.Run(os.Args))
+	code := cli.Run(os.Args)
+	// Exit after deferred functions have run (os.Exit skips them,
+	// which prevents sqlite WAL checkpoint on db.Close).
+	if code != 0 {
+		os.Exit(code)
+	}
 }
 
 type CLI struct {
@@ -362,6 +368,9 @@ func isInstalled() bool {
 // promptInstall checks if the service is installed and, if not, asks the user
 // whether to install it now. Returns true if the user declined (caller should exit).
 func (c *CLI) promptInstall() error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
 	if isInstalled() {
 		return nil
 	}
